@@ -157,7 +157,7 @@ def stop_task(task_id):
 
     cursor.execute("""
         UPDATE time_segments SET stopped_at = ?
-        WHERE task_id = ? AND stopped_at IS NULL
+        WHERE task_id = ? AND phase = ? AND stopped_at IS NULL
         """, (stopped_at, task_id, current_phase))
 
     cursor.execute("""
@@ -194,17 +194,21 @@ def complete_task(task_id):
     conn = get_connection()
     cursor = conn.cursor()
     stopped_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    cursor.execute("SELECT current_phase FROM tasks WHERE task_id = ?",(task_id,))
+    row = cursor.fetchone()
+    current_phase = row["current_phase"]
 
     cursor.execute("""
         UPDATE time_segments SET stopped_at = ?
-        WHERE task_id = ? AND stopped_at IS NULL
+        WHERE task_id = ? AND phase = ? AND stopped_at IS NULL
         """,
-        (stopped_at, task_id))
+        (stopped_at, task_id, current_phase))
 
     cursor.execute("""
         SELECT started_at, stopped_at FROM time_segments
-        WHERE task_id = ? AND stopped_at IS NOT NULL
-        """, (task_id,))
+        WHERE task_id = ? AND phase = ? AND stopped_at IS NOT NULL
+        """, (task_id,current_phase))
 
     segment = cursor.fetchall()
     total = 0
@@ -213,8 +217,15 @@ def complete_task(task_id):
         stop = datetime.strptime(seg["stopped_at"], "%Y-%m-%d %H:%M:%S")
         total += int((stop - start).total_seconds())
 
+    phase_col_map = {
+        "field_sheeting": "field_elasped",
+        "border_sheeting": "border_elapsed",
+        "packing":         "packing_elapsed"
+    }
+    phase_col = phase_col_map.get(current_phase, "field_elapsed")
+    
     cursor.execute("""
-        UPDATE tasks SET status = 'completed', total_elapsed = ? WHERE task_id = ? """, (total, task_id))
+        UPDATE tasks SET status = {phase_col} = ? WHERE task_id = ? """, (total, task_id))
 
     conn.commit()
     conn.close()
