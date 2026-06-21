@@ -230,6 +230,84 @@ def complete_task(task_id):
     conn.commit()
     conn.close()
     
+def move_to_border_phase (task_id, border_design, border_difficulty):
+    # This transitions the task from Field Sheeting to Border Sheeting.
+    # Saves the border design details and resets status to 'created'
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE tasks
+        SET current_phase = 'border_sheeting',
+            status = 'created',
+            border_design = ?,
+            border_difficulty = ?
+        WHERE task_id = ?
+        """, (border_design, border_difficulty, task_id))
+
+    conn.commit()
+    conn.close()
+    
+def move_to_packing_phase(task_id):
+    # Transition to the Packing phase.
+    # Packing auto-starts immediately so status is set to 'in_progress'
+    # and a new time segment is created for the packing phase.
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    cursor.execute("""
+        UPDATE tasks
+        SET current_phase = 'packing',
+            status = 'in_progress'
+        WHERE task_id = ?
+        """, (task_id,))
+
+    cursor.execute("""
+        INSERT INTO time_segments (task_id, phase, started_at) VALUES (?, 'packing', ?)
+        """, (task_id, started_at))
+
+    conn.commit()
+    conn.close()
+
+def save_notes_and_complete(task_id, general_notes, issues):
+    # Save the final notes and mark the entire job as completed.
+    # Sets the current_phase to 'completed' and status to 'completed'.
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE tasks
+        SET general_notes = ?,
+            issues_encountered = ?,
+            status = 'completed',
+            current_phase = 'completed'
+        WHERE task_id = ?
+        """, (general_notes, issues, task_id))
+
+    conn.commit()
+    conn.close()
+    
+def get_phase_elapsed(task_id):
+    # Return a dictionary of elapsed seconds per phase for a given task.
+    # Useful for building the final summary card.
+
+    task = get_task(task_id)
+    if not task:
+        return {}
+
+    return {
+        "field_elapsed":    task["field_elapsed"] or 0,
+        "border_elapsed":   task["border_elapsed"] or 0,
+        "packing_elapsed":  task["packing_elapsed"] or 0,
+        "total_elapsed":    (task["field_elapsed"] or 0) +
+                            (task["border_elapsed"] or 0) +
+                            (task["packing_elapsed"] or 0)
+    }
+    
 def update_message_ts(task_id, message_ts):
     # Store the Slack message timestamp for a task.
     # This updates the tasks table field used to track the last message sent for
@@ -244,14 +322,6 @@ def update_message_ts(task_id, message_ts):
     conn.commit()
     conn.close()
     
-def format_elapsed(seconds):
-    # Format elapsed seconds into a readable hours/minutes/seconds string.
-
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
-    secs = seconds % 60
-    return f"{hours} h {minutes}m {secs}s"
-
 def delete_task(task_id):
     conn = get_connection()
     cursor = conn.cursor()
@@ -277,6 +347,15 @@ def update_task(task_id, customer, invoice, task_desc, design, difficulty, due_d
     """, (customer, invoice, task_desc, design, difficulty, due_date, task_id))
     conn.commit()
     conn.close()
+    
+def format_elapsed(seconds):
+    # Format elapsed seconds into a readable hours/minutes/seconds string.
+    if seconds is None:
+        seconds = 0
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    return f"{hours} h {minutes}m {secs}s"
 
 if __name__ == "__main__":
     setup_database()
