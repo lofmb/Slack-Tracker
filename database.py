@@ -125,14 +125,18 @@ def start_task (task_id):
     conn = get_connection()
     cursor = conn.cursor()
     started_at =  datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    cursor.execute("SELECT current_phase FROM tasks WHERE task_id = ?",(task_id,))
+    row = cursor.fetchone()
+    current_phase = row["current_phase"]
 
     cursor.execute("""
         UPDATE tasks SET status = 'in_progress' WHERE task_id = ?
         """, (task_id,))
 
     cursor.execute("""
-        INSERT INTO time_segments (task_id, started_at) VALUES (?,?)
-        """, (task_id, started_at))
+        INSERT INTO time_segments (task_id, phase, started_at) VALUES (?,?,?)
+        """, (task_id, current_phase, started_at))
 
     conn.commit()
     conn.close()
