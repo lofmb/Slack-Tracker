@@ -50,7 +50,7 @@ def track_command(ack, body, client):
         view={
             "type": "modal",
             "callback_id": "track_step_1",  # ID used to catch the submission
-            "title": {"type": "plain_text", "text": "Project Basics (1/2)"},
+            "title": {"type": "plain_text", "text": "Field Sheeting"},
             "private_metadata":body["channel_id"],
             "submit": {"type": "plain_text", "text": "Next"},
             "close": {"type": "plain_text", "text": "Cancel"},
@@ -166,7 +166,7 @@ def handle_step_1(ack,body,client,):
     )
 
 @app.view("track_step_2")
-def handle_modal_submission(ack, body, client):
+def handle_step_2(ack, body, client):
     ack(response_action = "clear")
     user_id = body["user"]["id"]
     vals = body["view"]["state"]["values"]
@@ -205,7 +205,7 @@ def handle_modal_submission(ack, body, client):
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        f"*New Task Created*\n"
+                        f"*New Task Created - Phase 1/4: Field Sheeting*\n"
                         f"*ID:* T-{task_id}\n"
                         f"*Customer:*\n{prev_data['customer_name']}\n"
                         f"*Invoice:*\n{prev_data['invoice_number']}\n"
@@ -214,7 +214,7 @@ def handle_modal_submission(ack, body, client):
                         f"*Difficulty:*\n{difficulty}\n"
                         f"*Due:*\n{due_display}\n"
                         f"*Created by:*\n<@{user_id}>\n"
-                        "*Status:* Created"
+                        f"*Status:* Created"
                     )
                 }
             },
@@ -285,8 +285,38 @@ def handle_start(ack, body, client):
         return
 
     database.start_task(task_id)
-
-    # Update the card in the channel
+    phase = task["current_phase"]
+    
+    if phase == "field_sheeting":
+        card_text = (
+            f"* Phase 1/4: Field Sheeting - In Progress*\n"
+            f"*ID: T-{task_id}\n"
+            f"*Customer:* {task['customer_name']}\n"
+            f"Invoice:* {task['invoice_number']}\n"
+            f"Task:* {task['task_description']}"
+            f"*Field Design:* {task['field_design']}\n"
+            f"*Difficulty:*{task['difficulty']}\n"
+            f"Due:* {task['due_date']}\n"
+            f"*Created by:* <@{task['user_id']}>\n"
+            f"*Status:* In Progress"
+        )
+    elif phase == "border_sheeting":
+        field_time = database.format_elapsed(task["field_elapsed"])
+        card_text = (
+            f"*Phase 2/4: Border Sheeting — In Progress*\n"
+            f"*ID:* T-{task_id}\n"
+            f"*Customer:* {task['customer_name']}\n"
+            f"*Invoice:* {task['invoice_number']}\n"
+            f"*Task:* {task['task_description']}\n"
+            f"*Border Design:* {task['border_design']}\n"
+            f"*Border Difficulty:* {task['border_difficulty']}\n"
+            f"*Created by:* <@{task['user_id']}>\n"
+            f"*Field Sheeting Time:* {field_time}\n"
+            f"*Status:* In Progress"
+        )
+    else:
+        card_text = f"*Task T-{task_id} - In Progress*\n*Status:* In Progress"
+        
     client.chat_update(
         channel=channel_id,
         ts=task["message_ts"],
@@ -294,10 +324,7 @@ def handle_start(ack, body, client):
         blocks=[
             {
                 "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*Task In Progress*\n*ID:* T-{task_id}\n*Customer:* {task['customer_name']}\n*Invoice:* {task['invoice_number']}\n*Task:* {task['task_description']}\n*Field Design:* {task['field_design']}\n*Difficulty:* {task['difficulty']}\n*Due:* {task['due_date']}\n*Created by:* <@{task['user_id']}>\n*Status:* 🟢 In Progress"
-                }
+                "text": {"type": "mrkdwn", "text": card_text}
             },
             {
                 "type": "actions",
@@ -312,14 +339,20 @@ def handle_start(ack, body, client):
                     },
                     {
                         "type": "button",
-                        "text": {"type": "plain_text", "text": "Complete"},
+                        "text": {"type": "plain)text", "text": "Stop"},
+                        "style": "danger",
+                        "action_id": "stop_task",
+                        "value": str(task_id)    
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Complete Phase"},
                         "action_id": "complete_task",
-                        "value": str(task_id)
+                        "value": str(task_id)                        
                     }
                 ]
             }
-        ],
-
+        ]
     )
 
 #Stop Task Button
@@ -345,7 +378,37 @@ def handle_stop(ack, body, client):
 
     database.stop_task(task_id)
     updated_task = database.get_task(task_id)
-    elapsed = database.format_elapsed(updated_task["total_elapsed"])
+    phase = updated_task["current_phase"]
+    
+    #This pause card is baased on the current phase
+    
+    if phase == "field_sheeting":
+        elapsed = database.format_elapsed(updated_task["field_elapsed"])
+        card_text = (
+            f"*Phase 1/4: Field Sheeting — Paused*\n"
+            f"*ID:* T-{task_id}\n"
+            f"*Customer:* {task['customer_name']}\n"
+            f"*Invoice:* {task['invoice_number']}\n"
+            f"*Task:* {task['task_description']}\n"
+            f"*Field Design:* {task['field_design']}\n"
+            f"*Difficulty:* {task['difficulty']}\n"
+            f"*Due:* {task['due_date']}\n"
+            f"*Created by:* <@{task['user_id']}>\n"
+            f"*Status:* Paused\n"
+            f"*Field Time So Far:* {elapsed}"            
+        )
+    else:
+        elapsed = database.format_elapsed(updated_task["packing_elapsed"])
+        card_text = (
+            f"*Phase 3/4: Packing — Paused*\n"
+            f"*ID:* T-{task_id}\n"
+            f"*Customer:* {task['customer_name']}\n"
+            f"*Invoice:* {task['invoice_number']}\n"
+            f"*Task:* {task['task_description']}\n"
+            f"*Created by:* <@{task['user_id']}>\n"
+            f"*Status:* Paused\n"
+            f"*Packing Time So Far:* {elapsed}"
+        )
 
     client.chat_update(
         channel=body["channel"]["id"],
@@ -355,7 +418,7 @@ def handle_stop(ack, body, client):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*Task Paused*\n*ID:* T-{task_id}\n*Customer:* {task['customer_name']}\n*Invoice:* {task['invoice_number']}\n*Task:* {task['task_description']}\n*Field Design:* {task['field_design']}\n*Difficulty:* {task['difficulty']}\n*Due:* {task['due_date']}\n*Created by:* <@{task['user_id']}>\n*Status:* 🟠 Paused\n*Time logged:* {elapsed}"
+                    "text": card_text
                 }
             },
             {
@@ -377,7 +440,7 @@ def handle_stop(ack, body, client):
                     },
                     {
                         "type": "button",
-                        "text": {"type": "plain_text", "text": "Complete"},
+                        "text": {"type": "plain_text", "text": "Complete Phase"},
                         "action_id": "complete_task",
                         "value": str(task_id)
                     }
