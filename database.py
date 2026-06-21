@@ -18,6 +18,10 @@ def setup_database():
     #   - tasks: stores task metadata, status, and elapsed time
     #   - time_segments: stores individual work segments for a task
     # It commits the schema changes and closes the database connection.
+    # From Phase 1 Field Sheeting is from field_design to field_elapsed
+    # Phase 2 Border Sheeting is border_design to border_elapsed
+    # Phase 3 Packing is packing_elapsed
+    # Phase 4 Notes is general_notes to issues_encountered
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -34,6 +38,13 @@ def setup_database():
             is_na_due_date INTEGER DEFAULT 0,
             field_design TEXT,
             difficulty   TEXT,
+            field_elapsed INTEGER DEFAULT 0,
+            border_design   TEXT,
+            border_difficulty TEXT,
+            border_elapsed INTEGER DEFAULT 0,
+            packing_elapsed INTEGER DEFAULT 0,
+            general_notes TEXT,
+            issues_encountered  TEXT,
             status       TEXT NOT NULL DEFAULT 'created',
             created_at   TEXT NOT NULL,
             message_ts  TEXT,
@@ -45,6 +56,7 @@ def setup_database():
         CREATE TABLE IF NOT EXISTS time_segments(
             segment_id      INTEGER PRIMARY KEY AUTOINCREMENT,
             task_id         INTEGER NOT NULL,
+            phase           TEXT NOT NULL,
             started_at      TEXT NOT NULL,
             stopped_at      TEXT,
             FOREIGN KEY (task_id) REFERENCES tasks (task_id)
@@ -65,8 +77,8 @@ def create_task(user_id, channel_id, customer_name, invoice_number, task_descrip
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     cursor.execute("""
-        INSERT INTO tasks (user_id, channel_id, customer_name, invoice_number, task_description, due_date, is_na_due_date, field_design, difficulty, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
+        INSERT INTO tasks (user_id, channel_id, customer_name, invoice_number, task_description, due_date, is_na_due_date, field_design, difficulty, status, current_phase, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,'created', 'field_sheeting', ?)
         """, (user_id, channel_id, customer_name, invoice_number, task_description, due_date, is_na, design, difficulty, created_at)
         )
 
