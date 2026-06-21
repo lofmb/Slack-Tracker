@@ -472,23 +472,149 @@ def handle_complete(ack, body, client):
 
     database.complete_task(task_id)
     updated_task = database.get_task(task_id)
-    elapsed = database.format_elapsed(updated_task["total_elapsed"])
-
-    client.chat_update(
-        channel=channel_id,
-        ts=task["message_ts"],
-        text=f"Task -T{task_id} completed. Total time: {elapsed}",
-        blocks=[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*Task Completed*\n*ID:* T-{task_id}\n*Customer:* {task['customer_name']}\n*Invoice:* {task['invoice_number']}\n*Task:* {task['task_description']}\n*Field Design:* {task['field_design']}\n*Difficulty:* {task['difficulty']}\n*Due:* {task['due_date']}\n*Created by:* <@{task['user_id']}>\n*Status:* ✅ Completed\n*Total time:* {elapsed}"
-                }
+    phase = updated_task["current_phase"]
+    
+    if phase == "field_sheeting":
+        field_time = database.format_elapsed(updated_task["field_elapsed"])
+        metadata = json.dumps({"task_id": task_id, "channel_id": channel_id})
+        
+        client.views_open(
+            trigger_id=body["trigger_id"],
+            view={
+                "type": "modal",
+                "callback_id": "border_modal",
+                "title": {"type": "plain_text", "text": "Border Sheeting (Phase 2)"},
+                "submit": {"type": "plain_text", "text": "Start Border Phase"},
+                "close": {"type": "plain_text", "text": "Cancel"},
+                "private_metadata": metadata,
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": f" Field Sheeting complete!* Time logged: *{field_time}*\nNow enter the Border Sheeting details."
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "border_design_block",
+                        "label": {"type": "plain_text", "text": "Border Design Name"},
+                        
+                        "element": {
+                            "type": "plain_text_input",
+                            "action_id": "border_design"
+                        }
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "border_diff_block",
+                        "label": {"type": "plain_text", "text": "Border Difficulty"},
+                        "element": {
+                            "type": "plain_text_input",
+                            "action_id": "border_difficulty",
+                            "max_length": 2
+                        }
+                    }
+                ]
             }
-        ]
-    )
-
+        )
+    
+    #To start packing phase automatically
+    
+    elif phase == "border_sheeting":
+        database.move_to_packing_phase(task_id)
+        updated_task = database.get_task(task_id)
+        field_time = database.format_elapsed(updated_task["field_elapsed"])
+        border_time = database.format_elapsed(updated_task["border_elapsed"])
+        
+        result = client.chat_postMessage(
+            channel=channel_id,
+            text=f"Task T-{task_id} has moved to Packing.",
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*Phase 3/4: Packing — In Progress* \n"
+                            f"*ID:* T-{task_id}\n"
+                            f"*Customer:* {updated_task['customer_name']}\n"
+                            f"*Invoice:* {updated_task['invoice_number']}\n"
+                            f"*Task:* {updated_task['task_description']}\n"
+                            f"*Created by:* <@{updated_task['user_id']}>\n"
+                            f"*Field Sheeting Time:* {field_time}\n"
+                            f"*Border Sheeting Time:* {border_time}\n"
+                            f"*Status:* Packing In Progress"
+                        )
+                    }
+                },
+                {
+                    "type": "action",
+                    "block_id": f"task_actions_{task_id}",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Stop"},
+                            "style": "danger",
+                            "action_id": "stop_task",
+                            "value": str(task_id)
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Complete Phase"},
+                            "action_id": "complete_task",
+                            "value": str(task_id)
+                        }
+                    ]
+                }
+            ]
+        )
+        
+        database.update_message_ts(task_id, result["ts"])
+    
+    elif phase == "packing":
+        packing_time = database.format_elapsed(updated_task["packing_elapsed"])
+        metadata = json.dumps({"task_id":task_id, "channel_id": channel_id})
+        
+        client.views_open(
+            trigger_id=body["trigger_id"],
+            view={
+                "type": "modal",
+                "callback_id": "notes_modal",
+                "title": {"type": "plain_text", "text": "Job Notes (Phase 4)"},
+                "submit": {"type": "plain_text", "text": "Complete Job"},
+                "close": {"type": "plain_text", "text": "Cancel"},
+                "private_metadata": metadata,
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f" *Packing complete!* Time logged: *{packing_time}*\nAdd any final notes before closing this job."
+                        }
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "notes_block",
+                        "optional": True,
+                        "label": {"type": "plain_text", "text": "General Notes"},
+                        "element": {
+                            "type": "plain_text_input",
+                            "multiline": True,
+                            "action_id": "general_notes"
+                        }
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "issues_block",
+                        "optional": True,
+                        "label": {"type": "plain_text", "text": "Issues Encountered"},
+                        "element": {
+                            "type": "plain_text_input",
+                            "multiline": True,
+                            "action_id": "issues"
+                        }
+                    }
+                ]
+            }
+        )        
 #Delete Button
 @app.action("delete_task")
 def handle_delete(ack, body, client):
