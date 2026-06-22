@@ -518,6 +518,10 @@ def handle_complete(ack, body, client):
         field_time = database.format_elapsed(updated_task["field_elapsed"])
         border_time = database.format_elapsed(updated_task["border_elapsed"])
         
+        #Deleting old card (message) before posting new phase
+        
+        client.chat_delete(channel=channel_id, ts=task ["message_ts"])
+        
         result = client.chat_postMessage(
             channel=channel_id,
             text=f"Task T-{task_id} has moved to Packing.",
@@ -628,6 +632,10 @@ def handle_border_submission(ack,body, client):
     task = database.get_task(task_id)
     field_time = database.format_elapsed(task["field_elapsed"])
     
+# Deleting old field message before posting border
+
+    client.chat_delete(channel=channel_id, ts=task["message_ts"])
+    
 # posting card to the channel
     result = client.chat_postMessage(
         channel=channel_id,
@@ -691,6 +699,9 @@ def handle_notes_submission(ack,body,client):
     border_time = database.format_elapsed(elapsed["border_elapsed"])
     packing_time = database.format_elapsed(elapsed["packing_elapsed"])
     total_time = database.format_elapsed(elapsed["total_elapsed"])
+    
+# Deleting packing card before posting final summary
+    client.chat_delete(channel=channel_id, ts=task["message_ts"])
     
     client.chat_postMessage(
         channel=channel_id,
