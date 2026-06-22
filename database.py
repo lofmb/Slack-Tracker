@@ -46,6 +46,7 @@ def setup_database():
             general_notes TEXT,
             issues_encountered  TEXT,
             status       TEXT NOT NULL DEFAULT 'created',
+            current_phase TEXT,
             created_at   TEXT NOT NULL,
             message_ts  TEXT,
             total_elapsed INTEGER DEFAULT 0
@@ -62,6 +63,11 @@ def setup_database():
             FOREIGN KEY (task_id) REFERENCES tasks (task_id)
         )
         """)
+
+    cursor.execute("PRAGMA table_info(tasks)")
+    existing_columns = [row[1] for row in cursor.fetchall()]
+    if "current_phase" not in existing_columns:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN current_phase TEXT")
 
     conn.commit()
     conn.close()
@@ -162,7 +168,7 @@ def stop_task(task_id):
 
     cursor.execute("""
         SELECT started_at, stopped_at FROM time_segments
-        WHERE task_id = ? AND stopped_at IS NOT NULL
+        WHERE task_id = ? AND phase = ? AND stopped_at IS NOT NULL
         """, (task_id, current_phase))
 
     segments = cursor.fetchall()
@@ -173,14 +179,14 @@ def stop_task(task_id):
         total += int((stop - start).total_seconds())
         
     phase_col_map = {
-        "field_sheeting": "field_elasped",
+        "field_sheeting": "field_elapsed",
         "border_sheeting": "border_elapsed",
         "packing":         "packing_elapsed"
     }
     phase_col = phase_col_map.get(current_phase, "field_elapsed")
         
-    cursor.execute("""
-        UPDATE tasks SET status = 'paused', {phase_col} = ? WHERE task_id = ? """,
+    cursor.execute(
+        f"UPDATE tasks SET status = 'paused', {phase_col} = ? WHERE task_id = ?",
         (total, task_id))
 
     conn.commit()
@@ -218,14 +224,15 @@ def complete_task(task_id):
         total += int((stop - start).total_seconds())
 
     phase_col_map = {
-        "field_sheeting": "field_elasped",
+        "field_sheeting": "field_elapsed",
         "border_sheeting": "border_elapsed",
         "packing":         "packing_elapsed"
     }
     phase_col = phase_col_map.get(current_phase, "field_elapsed")
     
-    cursor.execute("""
-        UPDATE tasks SET status = {phase_col} = ? WHERE task_id = ? """, (total, task_id))
+    cursor.execute(
+        f"UPDATE tasks SET status = 'completed', {phase_col} = ? WHERE task_id = ?",
+        (total, task_id))
 
     conn.commit()
     conn.close()

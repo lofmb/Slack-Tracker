@@ -339,16 +339,9 @@ def handle_start(ack, body, client):
                     },
                     {
                         "type": "button",
-                        "text": {"type": "plain)text", "text": "Stop"},
-                        "style": "danger",
-                        "action_id": "stop_task",
-                        "value": str(task_id)    
-                    },
-                    {
-                        "type": "button",
                         "text": {"type": "plain_text", "text": "Complete Phase"},
                         "action_id": "complete_task",
-                        "value": str(task_id)                        
+                        "value": str(task_id)
                     }
                 ]
             }
@@ -413,6 +406,7 @@ def handle_stop(ack, body, client):
     client.chat_update(
         channel=body["channel"]["id"],
         ts=task["message_ts"],
+        text=f"Task T-{task_id} has been paused.",
         blocks=[
             {
                 "type": "section",
@@ -483,14 +477,14 @@ def handle_complete(ack, body, client):
             view={
                 "type": "modal",
                 "callback_id": "border_modal",
-                "title": {"type": "plain_text", "text": "Border Sheeting (Phase 2)"},
+                "title": {"type": "plain_text", "text": "Border Sheeting"},
                 "submit": {"type": "plain_text", "text": "Start Border Phase"},
                 "close": {"type": "plain_text", "text": "Cancel"},
                 "private_metadata": metadata,
                 "blocks": [
                     {
                         "type": "section",
-                        "text": f" Field Sheeting complete!* Time logged: *{field_time}*\nNow enter the Border Sheeting details."
+                        "text": {"type": "mrkdwn", "text": f"*Field Sheeting complete!* Time logged: *{field_time}*\nNow enter the Border Sheeting details."}
                     },
                     {
                         "type": "input",
@@ -546,7 +540,7 @@ def handle_complete(ack, body, client):
                     }
                 },
                 {
-                    "type": "action",
+                    "type": "actions",
                     "block_id": f"task_actions_{task_id}",
                     "elements": [
                         {
@@ -587,7 +581,7 @@ def handle_complete(ack, body, client):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f" *Packing complete!* Time logged: *{packing_time}*\nAdd any final notes before closing this job."
+                            "text": f"*Packing complete!* Time logged: *{packing_time}*\nAdd any final notes before closing this job."
                         }
                     },
                     {
@@ -632,7 +626,7 @@ def handle_border_submission(ack,body, client):
 # Transitioning to border phase in the database
     database.move_to_border_phase(task_id, border_design, border_difficulty)
     task = database.get_task(task_id)
-    field_time = database.format_elapsed(task["field_elapased"])
+    field_time = database.format_elapsed(task["field_elapsed"])
     
 # posting card to the channel
     result = client.chat_postMessage(
