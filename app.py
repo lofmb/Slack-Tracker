@@ -614,7 +614,119 @@ def handle_complete(ack, body, client):
                     }
                 ]
             }
-        )        
+        )
+        
+@app.view("border_modal")
+def handle_border_submission(ack,body, client):
+    ack()
+    user_id = body["user"]["id"]
+    vals = body["view"]["state"]["values"]
+    metadata = json.loads(body["view"]["private_metadata"])
+    task_id = metadata["task_id"]
+    channel_id = metadata["channel_id"]
+    
+# border details
+    border_design = vals["border_design_block"]["border_design"]["value"]
+    border_difficulty = vals["border_diff_block"]["border_difficulty"]["value"]
+    
+# Transitioning to border phase in the database
+    database.move_to_border_phase(task_id, border_design, border_difficulty)
+    task = database.get_task(task_id)
+    field_time = database.format_elapsed(task["field_elapased"])
+    
+# posting card to the channel
+    result = client.chat_postMessage(
+        channel=channel_id,
+        text=f"Task T -{task_id} has moved to Border Sheeting.",
+        blocks=[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*Phase 2/4: Border Sheeting — Ready to Start*\n"
+                        f"*ID:* T-{task_id}\n"
+                        f"*Customer:* {task['customer_name']}\n"
+                        f"*Invoice:* {task['invoice_number']}\n"
+                        f"*Task:* {task['task_description']}\n"
+                        f"*Border Design:* {border_design}\n"
+                        f"*Border Difficulty:* {border_difficulty}\n"
+                        f"*Created by:* <@{task['user_id']}>\n"
+                        f"*Field Sheeting Time:* {field_time}\n"
+                        f"*Status:* Created"
+                    )
+                }
+            },
+            {
+                "type": "actions",
+                "block_id": f"task_actions_{task_id}",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Start"},
+                        "style": "primary",
+                        "action_id": "start_task",
+                        "value": str(task_id)
+                    }
+                ]
+            }
+        ]
+    )
+    
+    database.update_message_ts(task_id, result["ts"])
+    
+@app.view("notes_modal")
+def handle_notes_submission(ack,body,client):
+    ack()
+    user_id = body["user"]["id"]
+    vals = body["view"]["state"]["values"]
+    metadata = json.loads(body["view"]["private_metadata"])
+    task_id = metadata["task_id"]
+    channel_id = metadata["channel_id"]
+    
+    general_notes = vals["notes_block"]["general_notes"]["value"] or "None"
+    issues = vals["issues_block"]["issues"]["value"] or "None"
+    
+    database.save_notes_and_complete(task_id, general_notes, issues)
+    task = database.get_task(task_id)
+    
+# Calculating all phase times and overall time
+
+    elapsed = database.get_phase_elapsed(task_id)
+    field_time = database.format_elapsed(elapsed["field_elapsed"])
+    border_time = database.format_elapsed(elapsed["border_elapsed"])
+    packing_time = database.format_elapsed(elapsed["packing_elapsed"])
+    total_time = database.format_elapsed(elapsed["total_elapsed"])
+    
+    client.chat_postMessage(
+        channel=channel_id,
+        text=f" Job T-{task_id} fully completed by <@{user_id}>",
+        blocks =[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"✅ *Job Complete — T-{task_id}*\n"
+                        f"*Customer:* {task['customer_name']}\n"
+                        f"*Invoice:* {task['invoice_number']}\n"
+                        f"*Task:* {task['task_description']}\n"
+                        f"*Completed by:* <@{user_id}>\n\n"
+                        f"*Phase Breakdown:*\n"
+                        f"🟦 Field Sheeting: {field_time}\n"
+                        f"🟨 Border Sheeting: {border_time}\n"
+                        f"📦 Packing: {packing_time}\n\n"
+                        f"⏱️ *Total Time: {total_time}*\n\n"
+                        f"*General Notes:* {general_notes}\n"
+                        f"*Issues Encountered:* {issues}"
+                    )
+                }
+            }
+        ]
+    )
+    
+
+        
 #Delete Button
 @app.action("delete_task")
 def handle_delete(ack, body, client):
@@ -648,7 +760,7 @@ def handle_delete(ack, body, client):
     client.chat_update(
         channel=channel_id,
         ts=task["message_ts"],
-        text=f"Task T-{task_id} has been deleted.",
+        text=f"Task T-{task_id} has been deleted by <@{user_id}>.",
         blocks=[
             {
                 "type": "section",
@@ -746,7 +858,7 @@ def handle_edit(ack, body, client):
                 {
                     "type": "input",
                     "block_id": "difficulty_block",
-                    "label": {"type": "plain_text", "text": "Sheeting Difficulty (Max 20)"},
+                    "label": {"type": "plain_text", "text": "Sheeting Difficulty"},
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "difficulty",
@@ -862,7 +974,7 @@ def handle_edit_submission(ack, body, client):
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        f"*Task Updated* ✏️\n"
+                        f"*Task Updated ✏️ - Phase 1/4: Field Sheeting*\n"
                         f"*ID:* T-{task_id}\n"
                         f"*Customer:* {customer_name}\n"
                         f"*Invoice:* {invoice_number}\n"
