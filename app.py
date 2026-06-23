@@ -314,6 +314,22 @@ def handle_start(ack, body, client):
             f"*Field Sheeting Time:* {field_time}\n"
             f"*Status:* In Progress"
         )
+        
+    elif phase == "packing":
+        field_time = database.format_elapsed(task["field_elapsed"])
+        border_time = database.format_elapsed(task["border_elapsed"])
+        card_text = (
+            f"Phase 3/4: Packing - In Progress*\n"
+            f"*ID:* T-{task_id}\n"
+            f"*Customer:* {task['customer_name']}\n"
+            f"*Invoice:* {task['invoice_number']}\n"
+            f"*Task:* {task['task_description']}\n"
+            f"*Created by:* <@{task['user_id']}>\n"
+            f"*Field Sheeting Time:* {field_time}\n"
+            f"*Border Sheeting Time:* {border_time}\n"
+            f"*Status:* In Progress"
+        )
+    
     else:
         card_text = f"*Task T-{task_id} - In Progress*\n*Status:* In Progress"
         
@@ -390,6 +406,22 @@ def handle_stop(ack, body, client):
             f"*Status:* Paused\n"
             f"*Field Time So Far:* {elapsed}"            
         )
+    
+    elif phase == "border_sheeting":
+        elapsed = database.format_elapsed(updated_task["border_elapsed"])
+        card_text = (
+            f"*Phase 2/4: Border Sheeting — Paused*\n"
+            f"*ID:* T-{task_id}\n"
+            f"*Customer:* {task['customer_name']}\n"
+            f"*Invoice:* {task['invoice_number']}\n"
+            f"*Task:* {task['task_description']}\n"
+            f"*Border Design:* {task['border_design']}\n"
+            f"*Border Difficulty:* {task['border_difficulty']}\n"
+            f"*Created by:* <@{task['user_id']}>\n"
+            f"*Status:* Paused\n"
+            f"*Border Time So Far:* {elapsed}"
+        )
+    
     else:
         elapsed = database.format_elapsed(updated_task["packing_elapsed"])
         card_text = (
