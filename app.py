@@ -513,59 +513,40 @@ def handle_complete(ack, body, client):
     #To start packing phase automatically
     
     elif phase == "border_sheeting":
-        database.move_to_packing_phase(task_id)
         updated_task = database.get_task(task_id)
         field_time = database.format_elapsed(updated_task["field_elapsed"])
         border_time = database.format_elapsed(updated_task["border_elapsed"])
+        metadata = json.dumps({"task_id": task_id, "channel_id": channel_id})
         
         #Deleting old card (message) before posting new phase
         
         client.chat_delete(channel=channel_id, ts=task ["message_ts"])
         
-        result = client.chat_postMessage(
-            channel=channel_id,
-            text=f"Task T-{task_id} has moved to Packing.",
-            blocks=[
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": (
-                            f"*Phase 3/4: Packing — In Progress* \n"
-                            f"*ID:* T-{task_id}\n"
-                            f"*Customer:* {updated_task['customer_name']}\n"
-                            f"*Invoice:* {updated_task['invoice_number']}\n"
-                            f"*Task:* {updated_task['task_description']}\n"
-                            f"*Created by:* <@{updated_task['user_id']}>\n"
-                            f"*Field Sheeting Time:* {field_time}\n"
-                            f"*Border Sheeting Time:* {border_time}\n"
-                            f"*Status:* Packing In Progress"
-                        )
-                    }
-                },
-                {
-                    "type": "actions",
-                    "block_id": f"task_actions_{task_id}",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Stop"},
-                            "style": "danger",
-                            "action_id": "stop_task",
-                            "value": str(task_id)
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Complete Phase"},
-                            "action_id": "complete_task",
-                            "value": str(task_id)
+        client.views_open(
+            trigger_id=body["trigger_id"],
+            view={
+                    "type": "modal",
+                    "callback_id": "packing_modal",
+                "title": {"type": "plain_text", "text": "Packing (Phase 3)"},
+                "submit": {"type": "plain_text", "text": "Start Packing Phase"},
+                "close": {"type": "plain_text", "text": "Cancel"},
+                "private_metadata": metadata,
+                "blocks":[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                f"*Border Sheeting Complete!*\n"
+                                f"Field Sheeting Time: *{field_time}*\n"
+                                f"Border Sheeting Time: *{border_time}*\n"
+                                f"Click 'Start Packing Phase' when you're ready"
+                            )
                         }
-                    ]
-                }
-            ]
+                    }
+                ]
+            }
         )
-        
-        database.update_message_ts(task_id, result["ts"])
     
     elif phase == "packing":
         packing_time = database.format_elapsed(updated_task["packing_elapsed"])
@@ -675,6 +656,58 @@ def handle_border_submission(ack,body, client):
         ]
     )
     
+    database.update_message_ts(task_id, result["ts"])
+    
+@app.view("packing_modal")
+def handle_packing_submission(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    metadata = json.loads(body["view"]["private_metadata"])
+    task_id = metadata["task_id"]
+    channel_id = metadata["channel_id"]
+
+    database.move_to_packing_phase(task_id)
+    task = database.get_task(task_id)
+    field_time = database.format_elapsed(task["field_elapsed"])
+    border_time = database.format_elapsed(task["border_elapsed"])
+
+    result = client.chat_postMessage(
+        channel=channel_id,
+        text=f"Task T-{task_id} has moved to Packing.",
+        blocks=[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*Phase 3/4: Packing — Ready to Start*\n"
+                        f"*ID:* T-{task_id}\n"
+                        f"*Customer:* {task['customer_name']}\n"
+                        f"*Invoice:* {task['invoice_number']}\n"
+                        f"*Task:* {task['task_description']}\n"
+                        f"*Field Sheeting Time:* {field_time}\n"
+                        f"*Border Sheeting Time:* {border_time}\n"
+                        f"*Created by:* <@{task['user_id']}>\n"
+                        f"*Status:* Created"
+                    )
+                }
+            },
+            {
+                "type": "actions",
+                "block_id": f"task_actions_{task_id}",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Start"},
+                        "style": "primary",
+                        "action_id": "start_task",
+                        "value": str(task_id)
+                    }
+                ]
+            }
+        ]
+    )
+
     database.update_message_ts(task_id, result["ts"])
     
 @app.view("notes_modal")

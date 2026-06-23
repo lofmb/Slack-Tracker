@@ -268,13 +268,9 @@ def move_to_packing_phase(task_id):
     cursor.execute("""
         UPDATE tasks
         SET current_phase = 'packing',
-            status = 'in_progress'
+            status = 'created'
         WHERE task_id = ?
         """, (task_id,))
-
-    cursor.execute("""
-        INSERT INTO time_segments (task_id, phase, started_at) VALUES (?, 'packing', ?)
-        """, (task_id, started_at))
 
     conn.commit()
     conn.close()
