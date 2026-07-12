@@ -240,7 +240,14 @@ def handle_step_2(ack, body, client):
                         "text": {"type": "plain_text", "text": "Delete"},
                         "style": "danger",
                         "action_id": "delete_task",
-                        "value":str(task_id)
+                        "value":str(task_id),
+                        "confirm": {
+                            "title": {"type": "plain_text", "text": "Delete Task?"},
+                            "text": {"type": "plain_text", "text": "Are you sure you want to delete this task? This cannot be undone."},
+                            "confirm": {"type": "plain_text", "text": "Yes, Delete"},
+                            "deny": {"type": "plain_text", "text": "Cancel"},
+                            "style": "danger"
+                        }
                     }
                 ]
             }
@@ -1006,7 +1013,13 @@ def handle_edit_submission(ack, body, client):
                 "text": {"type": "plain_text", "text": "Delete"},
                 "style": "danger",
                 "action_id": "delete_task",
-                "value": str(task_id)
+                "value": str(task_id),
+                "confirm": {
+                        "title": {"type": "plain_text", "text": "Delete Task?"},
+                        "text": {"type": "plain_text", "text": "Are you sure you want to delete this task? This cannot be undone."},
+                        "confirm": {"type": "plain_text", "text": "Yes, Delete"},
+                        "deny": {"type": "plain_text", "text": "Cancel"}
+                        }
             }
         ]
         status_text = "Created"
