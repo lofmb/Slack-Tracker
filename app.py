@@ -173,7 +173,7 @@ def handle_step_2(ack, body, client):
     
     # Fetching the Step 1 data from the metadata
     prev_data = json.loads(body["view"]["private_metadata"])
-    channel_id = prev_data["channel_id"]
+    team_channel_id = prev_data["channel_id"]
     
     # Collecting Step 2 values
     design = vals["design"]["val"]["value"]
@@ -182,7 +182,7 @@ def handle_step_2(ack, body, client):
     # Saving the task to the database
     task_id = database.create_task(
         user_id=user_id,
-        channel_id=channel_id,
+        channel_id=team_channel_id,
         customer_name=prev_data["customer_name"],
         invoice_number=prev_data["invoice_number"],
         task_description=prev_data["task_description"],
@@ -194,11 +194,15 @@ def handle_step_2(ack, body, client):
     
     # Displaying due date on card
     due_display = "N/A" if prev_data["is_na"] else prev_data["due_date"]
+
+    user_dm = client.conversations_open(users=user_id)
+    dm_channel_id = user_dm["channel"]["id"]
+
     
     #Posting the task card to channel
     result = client.chat_postMessage(
-        channel=channel_id,
-        text=f"New Task -{task_id} created by <@{user_id}>",
+        channel=dm_channel_id,
+        text=f"New Task -{task_id} created.",
         blocks=[
             {
                 "type": "section",
@@ -213,7 +217,6 @@ def handle_step_2(ack, body, client):
                         f"*Field Design:*\n{design}\n"
                         f"*Difficulty:*\n{difficulty}\n"
                         f"*Due:*\n{due_display}\n"
-                        f"*Created by:*\n<@{user_id}>\n"
                         f"*Status:* Created"
                     )
                 }
@@ -256,6 +259,12 @@ def handle_step_2(ack, body, client):
     
     # Saving the timestamp
     database.update_message_ts(task_id, result["ts"])
+    
+    client.chat_postEphemeral(
+        channel = team_channel_id,
+        user=user_id,
+        text=f" Task -T {task_id} created! Check your DMs with the bot to start tracking the job."
+    )
 
 @app.action("start_task")
 def handle_start(ack, body, client):
@@ -443,7 +452,7 @@ def handle_stop(ack, body, client):
         )
 
     client.chat_update(
-        channel=body["channel"]["id"],
+        channel=channel_id,
         ts=task["message_ts"],
         text=f"Task T-{task_id} has been paused.",
         blocks=[
@@ -509,7 +518,12 @@ def handle_complete(ack, body, client):
     
     if phase == "field_sheeting":
         field_time = database.format_elapsed(updated_task["field_elapsed"])
-        metadata = json.dumps({"task_id": task_id, "channel_id": channel_id})
+        metadata = json.dumps({"task_id": task_id, "dm_channel_id": channel_id, "team_channel_id": task["channel_id"]})
+        
+        client.chat_postMessage(
+            channel=task["channel_id"],
+            text=f" *T-{task_id} - Field Sheeting complete* | <@{user_id}> | Time: {field_time}"
+        )
         
         client.views_open(
             trigger_id=body["trigger_id"],
@@ -555,7 +569,12 @@ def handle_complete(ack, body, client):
         updated_task = database.get_task(task_id)
         field_time = database.format_elapsed(updated_task["field_elapsed"])
         border_time = database.format_elapsed(updated_task["border_elapsed"])
-        metadata = json.dumps({"task_id": task_id, "channel_id": channel_id})
+        metadata = json.dumps({"task_id": task_id, "dm_channel_id": channel_id,"team_channel_id": task["channel_id"]})
+        
+        client.chat_postMessage(
+            channel=task["channel_id"],
+            text=f" *T -{task_id} - Border Sheeting complete* | <@{user_id}> | Time: {border_time}"
+        )
         
         #Deleting old card (message) before posting new phase
         
@@ -589,7 +608,7 @@ def handle_complete(ack, body, client):
     
     elif phase == "packing":
         packing_time = database.format_elapsed(updated_task["packing_elapsed"])
-        metadata = json.dumps({"task_id":task_id, "channel_id": channel_id})
+        metadata = json.dumps({"task_id":task_id, "dm_channel_id": channel_id, "team_channel_id": task["channel_id"]})
         
         client.views_open(
             trigger_id=body["trigger_id"],
@@ -641,7 +660,8 @@ def handle_border_submission(ack,body, client):
     vals = body["view"]["state"]["values"]
     metadata = json.loads(body["view"]["private_metadata"])
     task_id = metadata["task_id"]
-    channel_id = metadata["channel_id"]
+    dm_channel_id = metadata["dm_channel_id"]
+    team_channel_id = metadata["team_channel_id"]
     
 # border details
     border_design = vals["border_design_block"]["border_design"]["value"]
@@ -652,13 +672,13 @@ def handle_border_submission(ack,body, client):
     task = database.get_task(task_id)
     field_time = database.format_elapsed(task["field_elapsed"])
     
-# Deleting old field message before posting border
+# Updating the DM card
 
-    client.chat_delete(channel=channel_id, ts=task["message_ts"])
+    client.chat_delete(channel=dm_channel_id, ts=task["message_ts"])
     
 # posting card to the channel
     result = client.chat_postMessage(
-        channel=channel_id,
+        channel=dm_channel_id,
         text=f"Task T -{task_id} has moved to Border Sheeting.",
         blocks=[
             {
@@ -703,16 +723,18 @@ def handle_packing_submission(ack, body, client):
     user_id = body["user"]["id"]
     metadata = json.loads(body["view"]["private_metadata"])
     task_id = metadata["task_id"]
-    channel_id = metadata["channel_id"]
+    dm_channel_id = metadata["channel_id"]
+    team_channel_id = metadata ["team_channel_id"]
 
     database.move_to_packing_phase(task_id)
     task = database.get_task(task_id)
     field_time = database.format_elapsed(task["field_elapsed"])
     border_time = database.format_elapsed(task["border_elapsed"])
 
-    result = client.chat_postMessage(
-        channel=channel_id,
-        text=f"Task T-{task_id} has moved to Packing.",
+    client.chat_update(
+        channel=dm_channel_id,
+        ts=task["message_ts"],
+        text = f"Task T-{task_id} has moved to Packing.",
         blocks=[
             {
                 "type": "section",
@@ -746,8 +768,6 @@ def handle_packing_submission(ack, body, client):
             }
         ]
     )
-
-    database.update_message_ts(task_id, result["ts"])
     
 @app.view("notes_modal")
 def handle_notes_submission(ack,body,client):
@@ -756,7 +776,8 @@ def handle_notes_submission(ack,body,client):
     vals = body["view"]["state"]["values"]
     metadata = json.loads(body["view"]["private_metadata"])
     task_id = metadata["task_id"]
-    channel_id = metadata["channel_id"]
+    dm_channel_id = metadata["dm_channel_id"]
+    team_channel_id = metadata["team_channel_id"]
     
     general_notes = vals["notes_block"]["general_notes"]["value"] or "None"
     issues = vals["issues_block"]["issues"]["value"] or "None"
@@ -773,10 +794,28 @@ def handle_notes_submission(ack,body,client):
     total_time = database.format_elapsed(elapsed["total_elapsed"])
     
 # Deleting packing card before posting final summary
-    client.chat_delete(channel=channel_id, ts=task["message_ts"])
+    client.chat_update(
+        channel = dm_channel_id,
+        ts=task["message_ts"],
+        text=f" Job T-{task_id} is complete. Summary posted to the team channel.",
+        blocks =[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"✅ *Job Complete — T-{task_id}*\n"
+                        f"*Customer:* {task['customer_name']}\n"
+                        f"Total Time: {total_time}\n"
+                        f"The full summary has been posted to the team channel"
+                    )
+                }
+            }
+        ]
+    )
     
     client.chat_postMessage(
-        channel=channel_id,
+        channel=team_channel_id,
         text=f" Job T-{task_id} fully completed by <@{user_id}>",
         blocks =[
             {
