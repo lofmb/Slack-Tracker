@@ -281,6 +281,7 @@ def handle_start(ack, body, client):
             user=user_id,
             text="Task not found. It may have been deleted."
         )
+        return
 
     # Block if task belongs to someone else
     if task["user_id"] != user_id:
@@ -305,14 +306,14 @@ def handle_start(ack, body, client):
     
     if phase == "field_sheeting":
         card_text = (
-            f"* Phase 1/4: Field Sheeting - In Progress*\n"
+            f"*Phase 1/4: Field Sheeting - In Progress*\n"
             f"*ID: T-{task_id}\n"
             f"*Customer:* {task['customer_name']}\n"
-            f"Invoice:* {task['invoice_number']}\n"
-            f"Task:* {task['task_description']}"
+            f"*Invoice:* {task['invoice_number']}\n"
+            f"*Task:* {task['task_description']}"
             f"*Field Design:* {task['field_design']}\n"
             f"*Difficulty:*{task['difficulty']}\n"
-            f"Due:* {task['due_date']}\n"
+            f"*Due:* {task['due_date']}\n"
             f"*Created by:* <@{task['user_id']}>\n"
             f"*Status:* In Progress"
         )
@@ -335,7 +336,7 @@ def handle_start(ack, body, client):
         field_time = database.format_elapsed(task["field_elapsed"])
         border_time = database.format_elapsed(task["border_elapsed"])
         card_text = (
-            f"Phase 3/4: Packing - In Progress*\n"
+            f"*Phase 3/4: Packing - In Progress*\n"
             f"*ID:* T-{task_id}\n"
             f"*Customer:* {task['customer_name']}\n"
             f"*Invoice:* {task['invoice_number']}\n"
@@ -506,7 +507,7 @@ def handle_complete(ack, body, client):
 
     if task["user_id"] != user_id:
         client.chat_postEphemeral(
-            channel=body["channel"]["id"],
+            channel=channel_id,
             user=user_id,
             text="You can only control your own tasks."
         )
@@ -723,7 +724,7 @@ def handle_packing_submission(ack, body, client):
     user_id = body["user"]["id"]
     metadata = json.loads(body["view"]["private_metadata"])
     task_id = metadata["task_id"]
-    dm_channel_id = metadata["channel_id"]
+    dm_channel_id = metadata["dm_channel_id"]
     team_channel_id = metadata ["team_channel_id"]
 
     database.move_to_packing_phase(task_id)
@@ -731,9 +732,8 @@ def handle_packing_submission(ack, body, client):
     field_time = database.format_elapsed(task["field_elapsed"])
     border_time = database.format_elapsed(task["border_elapsed"])
 
-    client.chat_update(
+    result = client.chat_postMessage(
         channel=dm_channel_id,
-        ts=task["message_ts"],
         text = f"Task T-{task_id} has moved to Packing.",
         blocks=[
             {
@@ -768,6 +768,8 @@ def handle_packing_submission(ack, body, client):
             }
         ]
     )
+    
+    database.update_message_ts(task_id, result["ts"])
     
 @app.view("notes_modal")
 def handle_notes_submission(ack,body,client):
