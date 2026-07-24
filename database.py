@@ -360,5 +360,20 @@ def format_elapsed(seconds):
     secs = seconds % 60
     return f"{hours} h {minutes}m {secs}s"
 
+def get_completed_tasks():
+    # Fetches completed tasks and orders by task_id in ascending order
+    # Used for excel export feature
+    
+    conn = get_connection
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT * FROM tasks
+        WHERE status = 'completed'
+        ORDER BY task_id ASC
+        """)
+    tasks = cursor.fetchall()
+    conn.close
+    return tasks
+
 if __name__ == "__main__":
     setup_database()
