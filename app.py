@@ -1,8 +1,10 @@
 import os
 import json
+import openpyxl
 from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+from io import BytesIO
 
 # Importing database functions
 
@@ -34,6 +36,14 @@ def track_command(ack, body, client):
     # Acknowledging the command
     ack()
     user_id = body ["user_id"]
+    
+    # Subcommand: /track export
+    subcommand = body.get ("text", "").strip().lower()
+    if subcommand == "export":
+        handle_export(body,client)
+        return
+    
+    
     # Checking if the task is already running
     active_task = database.get_active_task(user_id)
     if active_task:
@@ -112,6 +122,64 @@ def track_command(ack, body, client):
             ]
         }
     )
+
+def handle_export(body, client):
+    user_id = body["user_id"]
+    channel_id = body ["channel_id"]
+    
+    tasks = database.get_completed_tasks
+    
+    if not tasks:
+        client.chat_postEphemeral(
+            channel = channel_id,
+            user = user_id,
+            text = "No completed jobs found to export yet."
+        )
+        return
+    
+    # Building the Excel Spreadsheet
+    
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    
+    if ws is None:
+        ws = wb.create_sheet(title="Completed Jobs")
+    else:
+        ws.title = "Completed Jobs"
+    
+    # Headers
+    
+    headers = [
+        "Task ID",
+        "Customer",
+        "Invoice Number",
+        "Task Description",
+        "Due Date",
+        "Field Design",
+        "Field Difficulty",
+        "Field Sheeting Time",
+        "Border Design",
+        "Border Difficulty",
+        "Border Sheeting Time",
+        "Packing Time",
+        "Total Time",
+        "General Notes",
+        "Issues Encountered",
+        "Completed By (User ID)",
+        "Date Created",
+    ]
+    ws.append(headers)
+    
+    # Styling the headers
+    
+    from openpyxl.styles import Font, PatternFill, Alignment
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor ="2C3E50")
+    
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
 
 #Step 1 Submission - This stage collects data and pushes to the Step 2 Modal
 @app.view("track_step_1")
