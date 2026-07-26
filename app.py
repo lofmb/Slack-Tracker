@@ -180,6 +180,32 @@ def handle_export(body, client):
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center")
+        
+    # Data Rows
+    for task in tasks():
+        field_elapsed = task["field_elapsed"] or 0
+        border_elapsed = task["border_elapsed"] or 0
+        packing_elapsed = task["packing_elapsed"] or 0
+        total_elapsed = field_elapsed + border_elapsed + packing_elapsed
+
+        ws.append([
+            f"T-{task['task_id']}",
+            task["customer_name"],
+            task["invoice_number"],
+            task["task_description"],
+            task["due_date"] or "N/A",
+            task["field_design"] or "-",
+            database.format_elapsed(field_elapsed),
+            task["border_design"] or "-",
+            task["border_difficulty"] or "-",
+            database.format_elapsed(border_elapsed),
+            database.format_elapsed(packing_elapsed),
+            database.format_elapsed(total_elapsed),
+            task["general_notes"] or "None",
+            task["issues_encountered"] or "None",
+            task["user_id"],
+            task["created_at"],
+        ])
 
 #Step 1 Submission - This stage collects data and pushes to the Step 2 Modal
 @app.view("track_step_1")
