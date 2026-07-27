@@ -364,7 +364,7 @@ def get_completed_tasks():
     # Fetches completed tasks and orders by task_id in ascending order
     # Used for excel export feature
     
-    conn = get_connection
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
         SELECT * FROM tasks
@@ -372,7 +372,7 @@ def get_completed_tasks():
         ORDER BY task_id ASC
         """)
     tasks = cursor.fetchall()
-    conn.close
+    conn.close()
     return tasks
 
 if __name__ == "__main__":

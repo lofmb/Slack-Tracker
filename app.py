@@ -4,6 +4,7 @@ import openpyxl
 from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_sdk.errors import SlackApiError
 from io import BytesIO
 
 # Importing database functions
@@ -127,7 +128,23 @@ def handle_export(body, client):
     user_id = body["user_id"]
     channel_id = body ["channel_id"]
     
-    tasks = database.get_completed_tasks
+    tasks = database.get_completed_tasks()
+    
+    user_name_cache = {}
+    
+    def get_user_name(slack_user_id):
+        if slack_user_id in user_name_cache:
+            return user_name_cache[slack_user_id]
+
+        try:
+            response = client.users_info(user=slack_user_id)
+            profile = response.get("user", {}).get("profile", {})
+            name = profile.get("display_name") or profile.get("real_name") or slack_user_id
+        except SlackApiError:
+            name = slack_user_id
+
+        user_name_cache[slack_user_id] = name
+        return name
     
     if not tasks:
         client.chat_postEphemeral(
@@ -165,7 +182,7 @@ def handle_export(body, client):
         "Total Time",
         "General Notes",
         "Issues Encountered",
-        "Completed By (User ID)",
+        "Completed By",
         "Date Created",
     ]
     ws.append(headers)
@@ -182,7 +199,7 @@ def handle_export(body, client):
         cell.alignment = Alignment(horizontal="center")
         
     # Data Rows
-    for task in tasks():
+    for task in tasks:
         field_elapsed = task["field_elapsed"] or 0
         border_elapsed = task["border_elapsed"] or 0
         packing_elapsed = task["packing_elapsed"] or 0
@@ -195,6 +212,7 @@ def handle_export(body, client):
             task["task_description"],
             task["due_date"] or "N/A",
             task["field_design"] or "-",
+            task["difficulty"],
             database.format_elapsed(field_elapsed),
             task["border_design"] or "-",
             task["border_difficulty"] or "-",
@@ -203,10 +221,54 @@ def handle_export(body, client):
             database.format_elapsed(total_elapsed),
             task["general_notes"] or "None",
             task["issues_encountered"] or "None",
-            task["user_id"],
+            get_user_name(task["user_id"]),
             task["created_at"],
         ])
-
+        
+    #Auto-sizing columns, so the text can fit
+    for column_cells in ws.columns:
+        max_length = max(
+            len(str(cell.value)) if cell.value else 0
+            for cell in column_cells
+        )
+        ws.column_dimensions[column_cells[0].column_letter].width = min(max_length + 4,50)
+        
+    # Writing to in-memory bytes
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    
+    user_dm = client.conversations_open(users=user_id)
+    dm_channel_id = user_dm["channel"] ["id"]
+    
+    #Upload Files to user's DM
+    try:
+        client.files_upload_v2(
+            channel = dm_channel_id,
+            file=buffer.getvalue(),
+            filename = "trackbot_jobs_export.xlsx",
+            title = f"Trackbot Export - {len(tasks)} Completed Job(s)"
+        )
+    except SlackApiError as err:
+        error_code = err.response.get("error") if err.response is not None else "unknown_error"
+        if error_code == "missing_scope":
+            client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text=("Unable to upload export because the Slack app is missing the required "
+                      "`files:write` scope. Please update the app scopes and reinstall the app.")
+            )
+            return
+        raise
+        
+        #Confirmation of in the channel of the command working
+        
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text=f"Export ready! Check your DMs - {len(tasks)} completed job(s) exported to Excel."
+        )
+        
 #Step 1 Submission - This stage collects data and pushes to the Step 2 Modal
 @app.view("track_step_1")
 def handle_step_1(ack,body,client,):
