@@ -351,13 +351,12 @@ def handle_step_2(ack, body, client):
     # Displaying due date on card
     due_display = "N/A" if prev_data["is_na"] else prev_data["due_date"]
 
-    user_dm = client.conversations_open(users=user_id)
-    dm_channel_id = user_dm["channel"]["id"]
-
-    
+    # chat_postMessage accepts a user id and resolves the DM itself, returning
+    # the real D... conversation id in result["channel"]. conversations_open
+    # would need the im:write scope, which the LMSA Slack app does not hold.
     #Posting the task card to channel
     result = client.chat_postMessage(
-        channel=dm_channel_id,
+        channel=user_id,
         text=f"New Task -{task_id} created.",
         blocks=[
             {
