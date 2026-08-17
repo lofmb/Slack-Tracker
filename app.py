@@ -21,6 +21,15 @@ app = App(
     signing_secret=os.environ.get("SLACK_SIGNING_SECRET")
 )
 
+@app.middleware
+def track_slack_delivery(body, next):
+    # Note which Slack delivery is being handled, so a redelivery of the same
+    # click is recognised as the same action rather than applied twice. Scoped
+    # to this handler and cleared afterwards, so nothing carries over into the
+    # next request. Changes no behaviour a maker can see.
+    with database.slack_request(body):
+        return next()
+
 # /hello command test in slack
 
 @app.command ("/hello")
@@ -440,7 +449,7 @@ def handle_step_2(ack, body, client):
     )
     
     # Saving the timestamp
-    database.update_message_ts(task_id, result["ts"])
+    database.update_message_ts(task_id, result["channel"], result["ts"])
     
     client.chat_postEphemeral(
         channel = team_channel_id,
@@ -898,7 +907,7 @@ def handle_border_submission(ack,body, client):
         ]
     )
     
-    database.update_message_ts(task_id, result["ts"])
+    database.update_message_ts(task_id, result["channel"], result["ts"])
     
 @app.view("packing_modal")
 def handle_packing_submission(ack, body, client):
@@ -951,7 +960,7 @@ def handle_packing_submission(ack, body, client):
         ]
     )
     
-    database.update_message_ts(task_id, result["ts"])
+    database.update_message_ts(task_id, result["channel"], result["ts"])
     
 @app.view("notes_modal")
 def handle_notes_submission(ack,body,client):
