@@ -124,6 +124,25 @@ def track_command(ack, body, client):
         }
     )
 
+def resolve_existing_dm(client, user_id):
+    # Find the bot's existing DM conversation with a user, paging through the
+    # full list rather than trusting the first page.
+    #
+    # conversations_open would mint the conversation, but it needs the im:write
+    # scope, which the LMSA Slack app does not hold. Listing the bot's own IM
+    # conversations needs only im:read. Returns None when no DM exists yet --
+    # files_upload_v2 rejects a raw user id, so the caller must handle that
+    # rather than passing user_id through.
+    cursor = None
+    while True:
+        resp = client.users_conversations(types="im", limit=200, cursor=cursor)
+        for conversation in resp["channels"]:
+            if conversation.get("user") == user_id:
+                return conversation["id"]
+        cursor = (resp.get("response_metadata") or {}).get("next_cursor") or None
+        if not cursor:
+            return None
+
 def handle_export(body, client):
     user_id = body["user_id"]
     channel_id = body ["channel_id"]
@@ -238,9 +257,17 @@ def handle_export(body, client):
     wb.save(buffer)
     buffer.seek(0)
     
-    user_dm = client.conversations_open(users=user_id)
-    dm_channel_id = user_dm["channel"] ["id"]
-    
+    dm_channel_id = resolve_existing_dm(client, user_id)
+    if not dm_channel_id:
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text=("Unable to send the export because you do not have a direct message "
+                  "conversation with the bot yet. Start a job with `/track` first, then "
+                  "run the export again.")
+        )
+        return
+
     #Upload Files to user's DM
     try:
         client.files_upload_v2(
