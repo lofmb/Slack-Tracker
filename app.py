@@ -69,7 +69,7 @@ def track_command(ack, body, client):
         trigger_id=body["trigger_id"],
         view={
             "type": "modal",
-            "callback_id": "track_step_1",  # ID used to catch the submission
+            "callback_id": "trk_track_step_1",  # ID used to catch the submission
             "title": {"type": "plain_text", "text": "Field Sheeting"},
             "private_metadata":body["channel_id"],
             "submit": {"type": "plain_text", "text": "Next"},
@@ -306,7 +306,7 @@ def handle_export(body, client):
         )
         
 #Step 1 Submission - This stage collects data and pushes to the Step 2 Modal
-@app.view("track_step_1")
+@app.view("trk_track_step_1")
 def handle_step_1(ack,body,client,):
     vals = body["view"]["state"]["values"]
     channel_id = body["view"]["private_metadata"]
@@ -339,7 +339,7 @@ def handle_step_1(ack,body,client,):
     
     ack(response_action="push", view={
         "type": "modal",
-        "callback_id": "track_step_2",
+        "callback_id": "trk_track_step_2",
         "title": {"type": "plain_text", "text": "Field Design 2/2"},
         "submit": {"type": "plain_text", "text": "Create Task"},
         "close": {"type": "plain_text", "text": "Back"},
@@ -357,7 +357,7 @@ def handle_step_1(ack,body,client,):
     }
     )
 
-@app.view("track_step_2")
+@app.view("trk_track_step_2")
 def handle_step_2(ack, body, client):
     ack(response_action = "clear")
     user_id = body["user"]["id"]
@@ -420,20 +420,20 @@ def handle_step_2(ack, body, client):
                         "type":"button",
                         "text": {"type": "plain_text", "text": "Start"},
                         "style": "primary",
-                        "action_id": "start_task",
+                        "action_id": "trk_start_task",
                         "value": str(task_id)
                     },
                     {
                         "type": "button",
                         "text": {"type": "plain_text", "text": "Edit"},
-                        "action_id": "edit_task",
+                        "action_id": "trk_edit_task",
                         "value": str(task_id) 
                     },
                     {
                         "type": "button",
                         "text": {"type": "plain_text", "text": "Delete"},
                         "style": "danger",
-                        "action_id": "delete_task",
+                        "action_id": "trk_delete_task",
                         "value":str(task_id),
                         "confirm": {
                             "title": {"type": "plain_text", "text": "Delete Task?"},
@@ -457,7 +457,7 @@ def handle_step_2(ack, body, client):
         text=f" Task -T {task_id} created! Check your DMs with the bot to start tracking the job."
     )
 
-@app.action("start_task")
+@app.action("trk_start_task")
 def handle_start(ack, body, client):
     ack()
     task_id = int(body["actions"][0]["value"])
@@ -558,13 +558,13 @@ def handle_start(ack, body, client):
                         "type": "button",
                         "text": {"type": "plain_text", "text": "Stop"},
                         "style": "danger",
-                        "action_id": "stop_task",
+                        "action_id": "trk_stop_task",
                         "value": str(task_id)
                     },
                     {
                         "type": "button",
                         "text": {"type": "plain_text", "text": "Complete Phase"},
-                        "action_id": "complete_task",
+                        "action_id": "trk_complete_task",
                         "value": str(task_id)
                     }
                 ]
@@ -573,7 +573,7 @@ def handle_start(ack, body, client):
     )
 
 #Stop Task Button
-@app.action("stop_task")
+@app.action("trk_stop_task")
 def handle_stop(ack, body, client):
     ack()
     task_id = int(body["actions"][0]["value"])
@@ -663,19 +663,19 @@ def handle_stop(ack, body, client):
                         "type": "button",
                         "text": {"type": "plain_text", "text": "Resume"},
                         "style": "primary",
-                        "action_id": "start_task",
+                        "action_id": "trk_start_task",
                         "value": str(task_id)
                     },
                     {
                         "type":"button",
                         "text":{"type": "plain_text", "text": "Edit"},
-                        "action_id": "edit_task",
+                        "action_id": "trk_edit_task",
                         "value": str(task_id)
                     },
                     {
                         "type": "button",
                         "text": {"type": "plain_text", "text": "Complete Phase"},
-                        "action_id": "complete_task",
+                        "action_id": "trk_complete_task",
                         "value": str(task_id)
                     }
                 ]
@@ -684,7 +684,7 @@ def handle_stop(ack, body, client):
     )
 
 # Complete Task Button
-@app.action("complete_task")
+@app.action("trk_complete_task")
 def handle_complete(ack, body, client):
     ack()
     task_id = int(body["actions"][0]["value"])
@@ -721,7 +721,7 @@ def handle_complete(ack, body, client):
             trigger_id=body["trigger_id"],
             view={
                 "type": "modal",
-                "callback_id": "border_modal",
+                "callback_id": "trk_border_modal",
                 "title": {"type": "plain_text", "text": "Border Sheeting"},
                 "submit": {"type": "plain_text", "text": "Start Border Phase"},
                 "close": {"type": "plain_text", "text": "Cancel"},
@@ -776,7 +776,7 @@ def handle_complete(ack, body, client):
             trigger_id=body["trigger_id"],
             view={
                     "type": "modal",
-                    "callback_id": "packing_modal",
+                    "callback_id": "trk_packing_modal",
                 "title": {"type": "plain_text", "text": "Packing (Phase 3)"},
                 "submit": {"type": "plain_text", "text": "Start Packing Phase"},
                 "close": {"type": "plain_text", "text": "Cancel"},
@@ -806,7 +806,7 @@ def handle_complete(ack, body, client):
             trigger_id=body["trigger_id"],
             view={
                 "type": "modal",
-                "callback_id": "notes_modal",
+                "callback_id": "trk_notes_modal",
                 "title": {"type": "plain_text", "text": "Job Notes (Phase 4)"},
                 "submit": {"type": "plain_text", "text": "Complete Job"},
                 "close": {"type": "plain_text", "text": "Cancel"},
@@ -845,7 +845,7 @@ def handle_complete(ack, body, client):
             }
         )
         
-@app.view("border_modal")
+@app.view("trk_border_modal")
 def handle_border_submission(ack,body, client):
     ack()
     user_id = body["user"]["id"]
@@ -899,7 +899,7 @@ def handle_border_submission(ack,body, client):
                         "type": "button",
                         "text": {"type": "plain_text", "text": "Start"},
                         "style": "primary",
-                        "action_id": "start_task",
+                        "action_id": "trk_start_task",
                         "value": str(task_id)
                     }
                 ]
@@ -909,7 +909,7 @@ def handle_border_submission(ack,body, client):
     
     database.update_message_ts(task_id, result["channel"], result["ts"])
     
-@app.view("packing_modal")
+@app.view("trk_packing_modal")
 def handle_packing_submission(ack, body, client):
     ack()
     user_id = body["user"]["id"]
@@ -952,7 +952,7 @@ def handle_packing_submission(ack, body, client):
                         "type": "button",
                         "text": {"type": "plain_text", "text": "Start"},
                         "style": "primary",
-                        "action_id": "start_task",
+                        "action_id": "trk_start_task",
                         "value": str(task_id)
                     }
                 ]
@@ -962,7 +962,7 @@ def handle_packing_submission(ack, body, client):
     
     database.update_message_ts(task_id, result["channel"], result["ts"])
     
-@app.view("notes_modal")
+@app.view("trk_notes_modal")
 def handle_notes_submission(ack,body,client):
     ack()
     user_id = body["user"]["id"]
@@ -1037,7 +1037,7 @@ def handle_notes_submission(ack,body,client):
 
         
 #Delete Button
-@app.action("delete_task")
+@app.action("trk_delete_task")
 def handle_delete(ack, body, client):
     ack()
     task_id = int(body["actions"][0]["value"])
@@ -1082,7 +1082,7 @@ def handle_delete(ack, body, client):
     )
 
 
-@app.action("edit_task")
+@app.action("trk_edit_task")
 def handle_edit(ack, body, client):
     ack()
     task_id = int(body["actions"][0]["value"])
@@ -1117,7 +1117,7 @@ def handle_edit(ack, body, client):
         trigger_id=body["trigger_id"],
         view={
             "type": "modal",
-            "callback_id": "edit_task_modal",
+            "callback_id": "trk_edit_task_modal",
             "title": {"type": "plain_text", "text": "Edit Task"},
             "submit": {"type": "plain_text", "text": "Save Changes"},
             "close": {"type": "plain_text", "text": "Cancel"},
@@ -1191,7 +1191,7 @@ def handle_edit(ack, body, client):
     )
 
 
-@app.view("edit_task_modal")
+@app.view("trk_edit_task_modal")
 def handle_edit_submission(ack, body, client):
     ack()
     user_id = body["user"]["id"]
@@ -1231,20 +1231,20 @@ def handle_edit_submission(ack, body, client):
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Start"},
                 "style": "primary",
-                "action_id": "start_task",
+                "action_id": "trk_start_task",
                 "value": str(task_id)
             },
             {
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Edit"},
-                "action_id": "edit_task",
+                "action_id": "trk_edit_task",
                 "value": str(task_id)
             },
             {
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Delete"},
                 "style": "danger",
-                "action_id": "delete_task",
+                "action_id": "trk_delete_task",
                 "value": str(task_id),
                 "confirm": {
                         "title": {"type": "plain_text", "text": "Delete Task?"},
@@ -1261,19 +1261,19 @@ def handle_edit_submission(ack, body, client):
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Resume"},
                 "style": "primary",
-                "action_id": "start_task",
+                "action_id": "trk_start_task",
                 "value": str(task_id)
             },
             {
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Edit"},
-                "action_id": "edit_task",
+                "action_id": "trk_edit_task",
                 "value": str(task_id)
             },
             {
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Complete"},
-                "action_id": "complete_task",
+                "action_id": "trk_complete_task",
                 "value": str(task_id)
             }
         ]
