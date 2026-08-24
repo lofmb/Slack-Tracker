@@ -219,11 +219,19 @@ def _iso_to_sqlite_datetime(value):
 
 def _due_date_to_text(job):
     """
-    app.py displays whatever due date it was given, or "N/A".
+    Give app.py back the due date exactly as the person typed it.
 
-    LMSA keeps a real date plus the explicit "No Set Date?" choice, so the
-    stored date is rendered back in the DD/MM/YY the modal asks for.
+    The due date box accepts anything, and always has - "01/09/26", "Friday",
+    "ASAP", "next week", "01/09/26 (if paint arrives)". Whatever was typed is
+    what shows on the card, what the Edit form is filled in with, and what goes
+    in the Due Date column of the spreadsheet, so it has to come back word for
+    word. LMSA stores that text as dueDateText.
+
+    The date form is only used for a row saved before the text was kept.
     """
+    text = job.get("dueDateText")
+    if text is not None:
+        return text
     if job.get("dueDateNotApplicable"):
         return "N/A"
     iso = job.get("dueDate")
@@ -235,17 +243,19 @@ def _due_date_to_text(job):
     return f"{parts[2]}/{parts[1]}/{parts[0][2:]}"
 
 
-def _text_to_due_date(text):
+def _due_date_to_iso(text):
     """
-    The reverse: the modal collects DD/MM/YY (or DD/MM/YYYY) free text.
+    Work out a real date from the text, when the text happens to be one.
 
-    Returns (iso_date_or_None, not_applicable). Anything that is not a date —
-    "N/A", a blank, or free text the modal did not ask for — is recorded as
-    "no set date", which is the same sentinel app.py already substitutes.
+    This is only a bonus copy, kept beside the typed text for anything later
+    that wants to sort or filter by date. It is never what gets shown - the
+    typed text is - so failing to read a date here costs nothing and is the
+    normal outcome for "Friday" or "ASAP". The box has never been validated and
+    is not being validated now.
     """
     raw = (text or "").strip()
     if not raw or raw.upper() == "N/A":
-        return None, True
+        return None
     for separator in ("/", "-", "."):
         parts = raw.split(separator)
         if len(parts) == 3 and all(p.isdigit() for p in parts):
@@ -254,10 +264,10 @@ def _text_to_due_date(text):
                 year = f"20{year}"
             try:
                 if 1 <= int(day) <= 31 and 1 <= int(month) <= 12 and len(year) == 4:
-                    return f"{year}-{int(month):02d}-{int(day):02d}", False
+                    return f"{year}-{int(month):02d}-{int(day):02d}"
             except ValueError:
                 break
-    return None, True
+    return None
 
 
 def _current_phase(phases):
@@ -379,16 +389,18 @@ def setup_database():
 
 def create_task(user_id, channel_id, customer_name, invoice_number, task_description, due_date, is_na, design, difficulty):
     """Create a job and return its number — the T-number shown on the card."""
-    iso_due, not_applicable = _text_to_due_date(due_date)
-    if is_na:
-        iso_due, not_applicable = None, True
     data = _call("POST", "/jobs", {
         "ownerSlackUserId": user_id,
         "customerName": customer_name,
         "invoiceNumber": invoice_number,
         "taskDescription": task_description,
-        "dueDate": iso_due,
-        "dueDateNotApplicable": not_applicable,
+        # The typed text is the due date. The read-back date is a bonus, and
+        # the No Set Date flag records only whether the box was actually
+        # ticked - text nobody could read as a date is not the same thing as
+        # somebody saying there is no date.
+        "dueDateText": due_date,
+        "dueDate": _due_date_to_iso(due_date),
+        "dueDateNotApplicable": bool(is_na),
         "fieldDesignName": design,
         "fieldDifficulty": difficulty,
         "announceChannelId": channel_id,
@@ -603,7 +615,6 @@ def update_task(task_id, customer, invoice, task_desc, design, difficulty, due_d
     if resolved is None:
         return
     view, row = resolved
-    iso_due, not_applicable = _text_to_due_date(due_date)
     try:
         _call("POST", f"/jobs/{view['job']['id']}/edit", {
             "customerName": customer,
@@ -611,8 +622,13 @@ def update_task(task_id, customer, invoice, task_desc, design, difficulty, due_d
             "taskDescription": task_desc,
             "designName": design,
             "difficulty": difficulty,
-            "dueDate": iso_due,
-            "dueDateNotApplicable": not_applicable,
+            # No dueDateNotApplicable here on purpose. The Edit form has no
+            # No Set Date tick box, so there is nothing to send, and the old
+            # version never wrote that column on an edit either. Leaving the
+            # key out tells LMSA to keep whatever was chosen when the job was
+            # started, rather than quietly clearing it.
+            "dueDateText": due_date,
+            "dueDate": _due_date_to_iso(due_date),
             "actor": f"slack:{row['user_id']}",
         }, operation="update_task")
     except TrackerRefused as refusal:
