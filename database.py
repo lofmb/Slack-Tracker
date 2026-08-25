@@ -23,8 +23,10 @@ import contextvars
 import hashlib
 import json
 import os
+import threading
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 # --- configuration ---------------------------------------------------------
 # Loopback only. The tracker runs beside LMSA on the same host and the API is
@@ -110,12 +112,29 @@ def delivery_identity(body):
     return None
 
 
+# The receiving thread's copy of the current delivery identity, kept past the
+# middleware's exit so listener_executor() can read it when Bolt queues the
+# handler. Thread-local, so two requests being received at once cannot see
+# each other's identity.
+_dispatch_identity = threading.local()
+
+
 class slack_request:
     """
     Scope one delivery's identity to the handler that is running.
 
     Set on entry and reset on exit, including when the handler raises, so a
     later request can never inherit a key that was minted for an earlier one.
+
+    Entry also leaves a copy of the identity in _dispatch_identity below. Bolt
+    runs this middleware on the thread that received the request, but runs the
+    handler itself on a worker thread, and it only queues the handler after
+    this middleware has already exited — so by then the context variable is
+    empty again. The copy is what listener_executor() picks up, on the same
+    receiving thread, at the moment the handler is queued. It is overwritten
+    by every request (with None when the payload has no identity), never
+    trusted across requests, and the worker thread gets the identity through
+    the executor's own set/reset, so nothing here weakens the reset guarantee.
     """
 
     def __init__(self, body):
@@ -124,11 +143,45 @@ class slack_request:
 
     def __enter__(self):
         self._token = _current_identity.set(self._identity)
+        _dispatch_identity.value = self._identity
         return self
 
     def __exit__(self, *exc):
         _current_identity.reset(self._token)
+        # The _dispatch_identity copy is deliberately left in place: the
+        # executor reads it after this exit, still on the receiving thread.
         return False
+
+
+class _IdentityPreservingExecutor(ThreadPoolExecutor):
+    """
+    The same thread pool Bolt would create for itself, plus one step: carry
+    the delivery identity from the receiving thread onto the worker thread.
+
+    submit() still runs on the receiving thread, so it can read the copy the
+    middleware left in _dispatch_identity. The handler is wrapped so that the
+    identity is placed into the context variable on the worker thread just
+    before the handler runs, and always removed again afterwards — even when
+    the handler raises — so a reused worker thread starts the next handler
+    clean.
+    """
+
+    def submit(self, fn, *args, **kwargs):
+        identity = getattr(_dispatch_identity, "value", None)
+
+        def run_with_identity():
+            token = _current_identity.set(identity)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _current_identity.reset(token)
+
+        return super().submit(run_with_identity)
+
+
+def listener_executor():
+    """The executor app.py hands to Bolt; five workers, same as Bolt's own."""
+    return _IdentityPreservingExecutor(max_workers=5)
 
 
 def _idempotency_key(operation):

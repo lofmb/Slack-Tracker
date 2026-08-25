@@ -18,7 +18,12 @@ load_dotenv()
 
 app = App(
     token=os.environ.get("SLACK_bot_token"),
-    signing_secret=os.environ.get("SLACK_SIGNING_SECRET")
+    signing_secret=os.environ.get("SLACK_SIGNING_SECRET"),
+    # Bolt runs the handlers on worker threads. This executor carries the
+    # "which Slack delivery is this" note set by the middleware below onto
+    # the worker thread, so a redelivered click is still recognised as the
+    # same action there. See listener_executor() in database.py.
+    listener_executor=database.listener_executor()
 )
 
 @app.middleware

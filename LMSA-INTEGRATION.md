@@ -112,9 +112,25 @@ from `main`, and comes back into that line once it is proven.
 
 # Post-baseline feature history
 
-Nothing yet. The first entry will be added when the first post-baseline feature
-lands.
-
 For each feature, record: the feature name, the date, what changed from a maker's
 point of view, whether it was agreed with Luis beforehand, anything it needs on
 the LMSA side, and the commit or commits it arrived in.
+
+## Delivery identity on Bolt's worker threads (2026-08-26)
+
+Integration hardening, not a new feature — nothing a maker sees changed.
+
+The middleware that notes which Slack delivery is being handled runs on the
+thread that receives the request, but Bolt runs the handler itself on a worker
+thread, and the note was already cleared by the time the handler started. So in
+real use the handlers never saw it, and the replay protection LMSA builds on it
+never engaged. The fix hands Bolt an executor (`database.listener_executor()`)
+that picks the note up on the receiving thread and carries it onto the worker
+thread for exactly the length of the handler.
+
+Not agreed with Luis beforehand because it changes no tracker behaviour; it
+makes an LMSA-side guarantee real. LMSA side: none beyond re-vendoring —
+the receiving column (`job_events.idempotency_key`) already existed.
+
+Arrived in the commit that adds this entry, on `feature/listener-idempotency`,
+merged into `feature/lmsa-integration`.
