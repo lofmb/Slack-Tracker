@@ -270,26 +270,35 @@ def _due_date_to_iso(text):
     return None
 
 
-def _current_phase(phases):
+def _current_phase(job):
     """
-    The phase the card is showing: the first that has not been completed.
+    The phase the maker is on, exactly as LMSA stores it.
 
-    LMSA models running/paused per phase rather than per job, so the single
-    "current phase" app.py expects is derived rather than stored — which is
-    what lets a completed phase and a live one coexist in the same job.
+    Read, never derived. Deriving it as "the first phase that is not finished"
+    looks equivalent and is not: completing a phase would advance it, and
+    app.py completes the phase BEFORE asking where it is. Every branch then
+    lands a step early — the Border modal never opens, its design and
+    difficulty are never collected, and once all three phases are finished no
+    branch matches at all, so Complete goes quiet and the job can never be
+    finished. The cursor moves only when a modal is submitted, which is also
+    what lets a cancelled modal be re-opened by pressing Complete again.
     """
-    for name in PHASES:
-        row = next((p for p in phases if p.get("phase") == name), None)
-        if row is None or row.get("state") != "complete":
-            return name
-    return "completed"
+    phase = job.get("currentPhase")
+    if not phase:
+        # A server without the cursor column is a mismatched deployment. Fail
+        # loudly: the derived answer is wrong in a way nobody would notice.
+        raise TrackerApiError(
+            "tracker API returned no currentPhase — LMSA and the vendored "
+            "tracker are not the same version"
+        )
+    return phase
 
 
 def _legacy_status(job, phases):
     """Translate LMSA's job/phase state into the status vocabulary app.py reads."""
     if job.get("status") == "completed":
         return "completed"
-    phase_name = _current_phase(phases)
+    phase_name = _current_phase(job)
     if phase_name == "completed":
         return "completed"
     row = next((p for p in phases if p.get("phase") == phase_name), None)
@@ -298,6 +307,13 @@ def _legacy_status(job, phases):
         return "in_progress"
     if state == "paused":
         return "paused"
+    if state == "complete":
+        # The phase under the cursor is finished but the job is not: the maker
+        # has pressed Complete and owes the modal that follows. The upstream
+        # tracker says "completed" here, and app.py picks the card's buttons
+        # from it — answering "created" would rebuild the card without a
+        # Complete button and strand anyone who edits at that moment.
+        return "completed"
     return "created"
 
 
@@ -334,7 +350,7 @@ def _row(view, timing):
         "general_notes": job.get("generalNotes"),
         "issues_encountered": job.get("issuesEncountered"),
         "status": _legacy_status(job, phases),
-        "current_phase": _current_phase(phases),
+        "current_phase": _current_phase(job),
         "created_at": _iso_to_sqlite_datetime(job.get("createdAt")),
         "message_ts": job.get("cardMessageTs"),
         "dm_channel_id": job.get("dmChannelId"),
@@ -499,37 +515,67 @@ def complete_task(task_id):
             raise
 
 
+def _advance_cursor(job_id, phase, actor, operation):
+    """
+    Move the job's workflow cursor onto the phase whose modal was just
+    submitted. This is the only thing that advances it.
+    """
+    try:
+        _call("POST", f"/jobs/{job_id}/phase-cursor", {
+            "phase": phase,
+            "actor": actor,
+        }, operation=operation)
+    except TrackerRefused as refusal:
+        # cursor_regression means the cursor is already at or past this phase,
+        # which is the state the caller wanted; job_not_open means the job
+        # finished or was cancelled underneath. Neither is a fault.
+        if refusal.reason not in ("already_processed", "cursor_regression", "job_not_open"):
+            raise
+
+
 def move_to_border_phase(task_id, border_design, border_difficulty):
     """
-    Store the border design and difficulty the modal collected.
+    Record what the border modal collected, and move the cursor onto border.
 
-    The move itself needs no write: the field phase was completed a moment
-    earlier, and the card's phase follows from which phases are finished.
+    Two calls, because they are two different facts: what the maker typed, and
+    where the maker now is. Each carries its own idempotency key, so a
+    redelivered submission repeats neither. If the second call is the one that
+    fails, the cursor stays on field: pressing Complete re-opens this same
+    modal, and submitting it again finishes the move.
     """
     resolved = _row_for(task_id)
     if resolved is None:
         return
     view, row = resolved
+    job_id = view["job"]["id"]
+    actor = f"slack:{row['user_id']}"
     try:
-        _call("POST", f"/jobs/{view['job']['id']}/phases/details", {
+        _call("POST", f"/jobs/{job_id}/phases/details", {
             "phase": "border_sheeting",
             "designName": border_design,
             "difficulty": border_difficulty,
-            "actor": f"slack:{row['user_id']}",
+            "actor": actor,
         }, operation="move_to_border_phase")
     except TrackerRefused as refusal:
         if refusal.reason != "already_processed":
             raise
+    _advance_cursor(job_id, "border_sheeting", actor, "move_to_border_phase_cursor")
 
 
 def move_to_packing_phase(task_id):
     """
-    Packing collects nothing, so there is nothing to store.
+    Move the cursor onto packing.
 
-    Completing the border phase is what moves the card on; this call is kept
-    because app.py makes it, and it confirms the job is still there.
+    The packing modal collects nothing, so where the maker now is IS the whole
+    of what this submission records.
     """
-    _row_for(task_id)
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return
+    view, row = resolved
+    _advance_cursor(
+        view["job"]["id"], "packing", f"slack:{row['user_id']}", "move_to_packing_phase"
+    )
 
 
 def save_notes_and_complete(task_id, general_notes, issues):
