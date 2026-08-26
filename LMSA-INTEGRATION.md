@@ -110,6 +110,25 @@ Anything appended below is new development, not baseline recovery.
 Future Python work on the tracker branches from `feature/lmsa-integration`, never
 from `main`, and comes back into that line once it is proven.
 
+**The code describes the tracker, never how we happened to build it.**
+Comments, function names, test wording and commit messages explain actual
+workshop behaviour and call features by their real names — "Jig Size", "No
+Border", "Packing interruption" — never internal delivery shorthand: no
+F1/F2/F3-style numbers, no "slice 1", no "phase 2 of the work", no waves,
+stages, milestones or rollout language. Those labels describe our development
+order, which means nothing to anyone reading this code later. The word
+"phase" stays, of course, where it means a real workflow phase — Field,
+Border and Packing genuinely are phases in this tracker. Python comments
+describe what the workshop workflow is doing, why a state transition exists,
+what a maker can do, and what safety condition is being protected. Exact Git
+commit ids are used only where something technical genuinely needs them (the
+vendor pin on the LMSA side, deployment records), never as a feature's name.
+
+Maintained Python commits use truthful human authorship and this repository's
+normal commit style: a plain sentence saying what the change lets the tracker
+do. Do not add AI co-author, session, model, tool or generation metadata to
+commits, and never impersonate the original author.
+
 # Post-baseline feature history
 
 For each feature, record: the feature name, the date, what changed from a maker's
@@ -219,3 +238,55 @@ mistake it for a zero-length border. Two API operations (skip, and revert)
 with the usual audit and replay protection, a job can now finish with a skipped
 border, and a skipped border cannot be started, completed, given details or
 given a jig. Arrived in the single feature commit on `feature/no-border`.
+
+## Packing interruption (2026-08-26)
+
+Packing no longer has to wait for the sheeting to be finished. A maker doing
+field or border work can break off, pack for a while, and come back - which is
+how the workshop actually runs - and the times stay separate and truthful:
+sheeting time stays sheeting time, packing time is packing time, and nothing
+is ever added up into the wrong pot because work moved around.
+
+What changed for a maker:
+
+- The Field and Border cards - working or paused - gained a **Start Packing**
+  button. One press: the sheeting timer stops, the packing timer starts.
+  Nothing ever starts a timer on its own; the press is the start.
+- While packing this way the card shows packing in progress, names the
+  sheeting phase that is waiting, and shows both times side by side. Two
+  buttons: **Stop Packing**, and **Back to Field Sheeting** (or Border) -
+  one press each way, and there is never a moment with two timers going.
+- A paused sheeting card on a job that holds packing time now shows
+  "Packing Time So Far" alongside the sheeting time, so both halves of the
+  day are visible on one card.
+- The job itself does not move. Packing done this way is time against
+  packing, not a decision that the sheeting is over - Complete Phase still
+  walks the job through Field, Border and Packing in order, exactly as
+  before. Pressing Complete Phase on a sheeting card while the packing timer
+  is running is refused with a message saying to deal with the packing first.
+
+This also loosened the "Border after all" rule from the No Border entry
+above, which refused as soon as packing had any time - a limit that existed
+only because one phase could not wait paused while another was worked. Now it
+can, so the way back stays open until packing is **finished**: stop the
+packing timer, press Border after all, and the border details step comes
+back. The packing time already worked stays on the job - it was real labour -
+and the job returns to packing afterwards through the normal steps. A
+correction is still refused while the packing timer is actually running
+(stop it first, the message says so), and once packing has been completed the
+button is gone and the refusal explains why.
+
+Agreed with Luis beforehand: yes - "packing is manually started and may
+interrupt sheeting" and "nothing ever auto-starts a timer" are both from the
+creator review, and this is built to exactly those words. The one automatic
+thing is conservative: switching to packing closes the timer the maker is
+walking away from, never opens one they did not ask for.
+
+LMSA side: no schema change - the timing ledger and the phase lanes were
+built for this. The segment-start operation gained an "interrupting" switch
+that closes the running segment (recorded as interrupted, not stopped by
+hand) in the same transaction the new one opens in, so a job can never hold
+two live timers however clicks race or repeat. Completing a phase now refuses
+while another phase's timer runs, and the border-skip revert refuses only for
+a live timer or finished packing. Arrived in the single feature commit on
+`feature/packing-interruption`.

@@ -455,6 +455,13 @@ def _row(view, timing):
         # keys off it.
         "border_skipped": _phase_of(phases, "border_sheeting", "state") == "skipped",
         "packing_begun": _packing_begun(phases, packing),
+        # Packing can be worked out of turn, as an interruption of the
+        # sheeting, so the cards need to know two more things: is the packing
+        # timer the one running right now, and has packing been finished for
+        # good. Everything between those two — packing that has some time but
+        # is not running — shows up through packing_elapsed.
+        "packing_running": _phase_of(phases, "packing", "state") == "running",
+        "packing_finished": _phase_of(phases, "packing", "state") == "complete",
         "packing_elapsed": packing,
         "general_notes": job.get("generalNotes"),
         "issues_encountered": job.get("issuesEncountered"),
@@ -568,7 +575,15 @@ def get_task(task_id):
 
 
 def start_task(task_id):
-    """Start — or resume — timing the phase the card is showing."""
+    """
+    Start — or resume — timing the phase the card is showing.
+
+    Sent with "interrupting", which tells LMSA that if the packing timer is
+    running it should be stopped in the same moment this one starts. That is
+    how "Back to Field Sheeting" on the packing card works: one press, the
+    packing timer closes, the sheeting timer opens, and there is never an
+    instant with two timers or none. Nothing starts without this press.
+    """
     resolved = _row_for(task_id)
     if resolved is None:
         return
@@ -580,6 +595,7 @@ def start_task(task_id):
         _call("POST", f"/jobs/{view['job']['id']}/segments/start", {
             "phase": phase,
             "actor": f"slack:{row['user_id']}",
+            "interrupting": True,
         }, operation="start_task")
     except TrackerRefused as refusal:
         # already_running is a second click on a card that is already going, and
@@ -589,8 +605,41 @@ def start_task(task_id):
             raise
 
 
+def start_packing(task_id):
+    """
+    Start the packing timer while the job is still on Field or Border work.
+
+    A maker sheeting a field may need to stop and pack for a while, then come
+    back to the sheeting. The sheeting timer is closed and the packing timer
+    opened in one step, so the times stay separate and truthful — sheeting
+    time stays sheeting time, packing time is packing time.
+
+    Returns "started", or the reason it could not, so the handler can tell
+    the maker instead of pretending. A second click on the same button, or the
+    same click delivered twice, reports "started" — the timer is running,
+    which is what the maker asked for.
+    """
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return None
+    view, row = resolved
+    if row["current_phase"] == "completed":
+        return "job_not_open"
+    try:
+        _call("POST", f"/jobs/{view['job']['id']}/segments/start", {
+            "phase": "packing",
+            "actor": f"slack:{row['user_id']}",
+            "interrupting": True,
+        }, operation="start_packing")
+    except TrackerRefused as refusal:
+        if refusal.reason in ("already_running", "already_processed"):
+            return "started"
+        return refusal.reason
+    return "started"
+
+
 def stop_task(task_id):
-    """Pause the running phase. Elapsed time is recomputed by LMSA from segments."""
+    """Pause the running timer. Elapsed time is recomputed by LMSA from segments."""
     resolved = _row_for(task_id)
     if resolved is None:
         return
@@ -598,6 +647,11 @@ def stop_task(task_id):
     phase = row["current_phase"]
     if phase == "completed":
         return
+    # When packing is being worked as an interruption, the running timer is
+    # the packing one, whatever phase the job itself is on — so that is the
+    # one Stop stops.
+    if row.get("packing_running") and phase != "packing":
+        phase = "packing"
     try:
         _call("POST", f"/jobs/{view['job']['id']}/segments/stop", {
             "phase": phase,
@@ -610,22 +664,34 @@ def stop_task(task_id):
 
 
 def complete_task(task_id):
-    """Finish the current phase, closing any timer still running on it."""
+    """
+    Finish the current phase, closing any timer still running on it.
+
+    Returns "completed", or the reason it could not. The one refusal a maker
+    can genuinely cause is "another_phase_running" — pressing Complete Phase
+    on a sheeting card while the packing timer is going. Completing the phase
+    underneath a running timer would leave that timer stranded, so LMSA says
+    no and the handler tells the maker to deal with the packing first.
+    """
     resolved = _row_for(task_id)
     if resolved is None:
-        return
+        return None
     view, row = resolved
     phase = row["current_phase"]
     if phase == "completed":
-        return
+        return "completed"
     try:
         _call("POST", f"/jobs/{view['job']['id']}/phases/complete", {
             "phase": phase,
             "actor": f"slack:{row['user_id']}",
         }, operation="complete_task")
     except TrackerRefused as refusal:
-        if refusal.reason not in ("phase_already_complete", "already_processed"):
-            raise
+        if refusal.reason in ("phase_already_complete", "already_processed"):
+            return "completed"
+        if refusal.reason == "another_phase_running":
+            return refusal.reason
+        raise
+    return "completed"
 
 
 def _advance_cursor(job_id, phase, actor, operation):

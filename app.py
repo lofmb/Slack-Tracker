@@ -634,6 +634,18 @@ def handle_start(ack, body, client):
         }
     ]
 
+    # Packing can cut in on sheeting work - a maker may need to stop and pack
+    # for a while, then come back. One press swaps the timers over; nothing
+    # starts a timer on its own. Offered until packing has been finished for
+    # good.
+    if phase in ("field_sheeting", "border_sheeting") and not task.get("packing_finished"):
+        buttons.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Start Packing"},
+            "action_id": "trk_start_packing",
+            "value": str(task_id)
+        })
+
     # Every working card offers Add Jig - from Border onwards the modal asks
     # which phase used it, so a late Field jig has a supported route in
     if phase in ("field_sheeting", "border_sheeting", "packing"):
@@ -692,6 +704,14 @@ def handle_stop(ack, body, client):
 
     #This pause card is baased on the current phase
 
+    # Packing worked as an interruption shows up here too: once the job holds
+    # any packing time, the paused sheeting card says so, so the maker can see
+    # both halves of their day on one card.
+    packing_line = (
+        f"*Packing Time So Far:* {database.format_elapsed(updated_task['packing_elapsed'])}\n"
+        if updated_task["packing_elapsed"] else ""
+    )
+
     if phase == "field_sheeting":
         elapsed = database.format_elapsed(updated_task["field_elapsed"])
         card_text = (
@@ -706,6 +726,7 @@ def handle_stop(ack, body, client):
             f"*Due:* {task['due_date']}\n"
             f"*Created by:* <@{task['user_id']}>\n"
             f"*Status:* Paused\n"
+            f"{packing_line}"
             f"*Field Time So Far:* {elapsed}"
         )
 
@@ -722,6 +743,7 @@ def handle_stop(ack, body, client):
             f"{border_jig_line}"
             f"*Created by:* <@{task['user_id']}>\n"
             f"*Status:* Paused\n"
+            f"{packing_line}"
             f"*Border Time So Far:* {elapsed}"
         )
     
@@ -766,6 +788,29 @@ def handle_stop(ack, body, client):
         }
     ]
 
+    # Same interruption route as the working card: packing can be picked up
+    # from a paused sheeting card too.
+    if phase in ("field_sheeting", "border_sheeting") and not updated_task.get("packing_finished"):
+        buttons.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Start Packing"},
+            "action_id": "trk_start_packing",
+            "value": str(task_id)
+        })
+
+    # A job marked No Border can still turn out to need one, even after some
+    # packing has been done - the way back stays open until packing is
+    # finished. The button lives on the paused card, not the running one,
+    # because the correction is refused while the timer is going: stopping is
+    # what reopens it, and a button that always refuses is worse than none.
+    if phase == "packing" and updated_task.get("border_skipped") and not updated_task.get("packing_finished"):
+        buttons.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Border after all"},
+            "action_id": "trk_undo_no_border",
+            "value": str(task_id)
+        })
+
     # Every working card offers Add Jig - from Border onwards the modal asks
     # which phase used it, so a late Field jig has a supported route in
     if phase in ("field_sheeting", "border_sheeting", "packing"):
@@ -796,6 +841,170 @@ def handle_stop(ack, body, client):
         ]
     )
 
+# Start Packing button - packing as an interruption of sheeting work
+@app.action("trk_start_packing")
+def handle_start_packing(ack, body, client):
+    """
+    The maker breaks off sheeting to pack for a while.
+
+    One press: the sheeting timer stops, the packing timer starts, and the
+    card shows both. The job itself stays on its sheeting phase - packing done
+    this way is time against packing, not a decision that the sheeting is
+    over - and "Back to ..." on the new card is how the maker returns.
+    """
+    ack()
+    task_id = int(body["actions"][0]["value"])
+    user_id = body["user"]["id"]
+    task = database.get_task(task_id)
+    channel_id = body["container"]["channel_id"]
+
+    if task is None:
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text="Task not found. It may have been deleted."
+        )
+        return
+
+    if task["user_id"] != user_id:
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text="You can only control your own tasks."
+        )
+        return
+
+    outcome = database.start_packing(task_id)
+    if outcome != "started":
+        if outcome == "phase_already_complete":
+            text = "Packing has already been finished on this job."
+        elif outcome == "job_not_open":
+            text = "This job is no longer open."
+        else:
+            text = "Packing could not be started, so nothing has been changed."
+        client.chat_postEphemeral(channel=channel_id, user=user_id, text=text)
+        return
+
+    updated_task = database.get_task(task_id)
+    phase = updated_task["current_phase"]
+    packing_time = database.format_elapsed(updated_task["packing_elapsed"])
+
+    if phase == "packing":
+        # The job had already moved on to its packing phase on another surface,
+        # so this press is an ordinary packing start - show the normal card.
+        field_time = database.format_elapsed(updated_task["field_elapsed"])
+        border_time = border_time_display(updated_task)
+        named_field_jig_line = f"*Field Jig Size:* {updated_task['field_jigs']}\n" if updated_task["field_jigs"] else ""
+        named_border_jig_line = f"*Border Jig Size:* {updated_task['border_jigs']}\n" if updated_task["border_jigs"] else ""
+        client.chat_update(
+            channel=channel_id,
+            ts=task["message_ts"],
+            text=f"Task T-{task_id} is now in progress.",
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*Phase 3/4: Packing - In Progress*\n"
+                            f"*ID:* T-{task_id}\n"
+                            f"*Customer:* {updated_task['customer_name']}\n"
+                            f"*Invoice:* {updated_task['invoice_number']}\n"
+                            f"*Task:* {updated_task['task_description']}\n"
+                            f"{named_field_jig_line}"
+                            f"{named_border_jig_line}"
+                            f"*Created by:* <@{updated_task['user_id']}>\n"
+                            f"*Field Sheeting Time:* {field_time}\n"
+                            f"*Border Sheeting Time:* {border_time}\n"
+                            f"*Status:* In Progress"
+                        )
+                    }
+                },
+                {
+                    "type": "actions",
+                    "block_id": f"task_actions_{task_id}",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Stop"},
+                            "style": "danger",
+                            "action_id": "trk_stop_task",
+                            "value": str(task_id)
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Complete Phase"},
+                            "action_id": "trk_complete_task",
+                            "value": str(task_id)
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Add Jig"},
+                            "action_id": "trk_add_jig",
+                            "value": str(task_id)
+                        }
+                    ]
+                }
+            ]
+        )
+        return
+
+    # The card the maker packs from. The waiting sheeting phase is named, and
+    # both times sit side by side so it is clear which timer is going.
+    if phase == "border_sheeting":
+        sheet_name = "Border Sheeting"
+        sheet_time = database.format_elapsed(updated_task["border_elapsed"])
+    else:
+        sheet_name = "Field Sheeting"
+        sheet_time = database.format_elapsed(updated_task["field_elapsed"])
+
+    client.chat_update(
+        channel=channel_id,
+        ts=task["message_ts"],
+        text=f"Task T-{task_id}: packing now, {sheet_name.lower()} is waiting.",
+        blocks=[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*Packing — In Progress*\n"
+                        f"_{sheet_name} is paused while you pack. Its time is safe, "
+                        f"and the job is still on that phase._\n"
+                        f"*ID:* T-{task_id}\n"
+                        f"*Customer:* {updated_task['customer_name']}\n"
+                        f"*Invoice:* {updated_task['invoice_number']}\n"
+                        f"*Task:* {updated_task['task_description']}\n"
+                        f"*Created by:* <@{updated_task['user_id']}>\n"
+                        f"*{sheet_name} Time So Far:* {sheet_time}\n"
+                        f"*Packing Time So Far:* {packing_time}"
+                    )
+                }
+            },
+            {
+                "type": "actions",
+                "block_id": f"task_actions_{task_id}",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Stop Packing"},
+                        "style": "danger",
+                        "action_id": "trk_stop_task",
+                        "value": str(task_id)
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": f"Back to {sheet_name}"},
+                        "style": "primary",
+                        "action_id": "trk_start_task",
+                        "value": str(task_id)
+                    }
+                ]
+            }
+        ]
+    )
+
+
 # Complete Task Button
 @app.action("trk_complete_task")
 def handle_complete(ack, body, client):
@@ -817,7 +1026,19 @@ def handle_complete(ack, body, client):
         )
         return
 
-    database.complete_task(task_id)
+    outcome = database.complete_task(task_id)
+    if outcome == "another_phase_running":
+        # The packing timer is going - most likely this press came from an old
+        # sheeting card while the maker is packing. Finishing the phase under
+        # a running timer would strand it, so nothing has moved.
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text=("The packing timer is running on this job, so this phase has "
+                  "not been completed. Stop the packing first, then press "
+                  "Complete Phase again.")
+        )
+        return
     updated_task = database.get_task(task_id)
     phase = updated_task["current_phase"]
     
@@ -990,10 +1211,31 @@ def handle_border_submission(ack,body, client):
     border_jig = (vals["border_jig_block"]["border_jig"]["value"] or "").strip()
 
 # Transitioning to border phase in the database
-    database.move_to_border_phase(task_id, border_design, border_difficulty, border_jig)
+    try:
+        database.move_to_border_phase(task_id, border_design, border_difficulty, border_jig)
+    except database.TrackerRefused as refusal:
+        if refusal.reason != "another_phase_running":
+            raise
+        # The packing timer is going, so the border cannot be put back
+        # underneath it. Say so; the form can be submitted again once the
+        # packing has been stopped.
+        client.chat_postEphemeral(
+            channel=dm_channel_id,
+            user=user_id,
+            text=("The packing timer is running on this job, so the border "
+                  "details have not been saved. Stop the packing first, then "
+                  "press Complete Phase to get this form back.")
+        )
+        return
     task = database.get_task(task_id)
     field_time = database.format_elapsed(task["field_elapsed"])
     border_jig_line = f"*Jig Size:* {border_jig}\n" if border_jig else ""
+    # A job can already hold packing time here - packed during field work, or
+    # packed before a missed border came to light. Shown so it is not "lost".
+    packing_line = (
+        f"*Packing Time So Far:* {database.format_elapsed(task['packing_elapsed'])}\n"
+        if task["packing_elapsed"] else ""
+    )
     
 # Updating the DM card
 
@@ -1019,6 +1261,7 @@ def handle_border_submission(ack,body, client):
                         f"{border_jig_line}"
                         f"*Created by:* <@{task['user_id']}>\n"
                         f"*Field Sheeting Time:* {field_time}\n"
+                        f"{packing_line}"
                         f"*Status:* Created"
                     )
                 }
@@ -1033,14 +1276,22 @@ def handle_border_submission(ack,body, client):
                         "style": "primary",
                         "action_id": "trk_start_task",
                         "value": str(task_id)
+                    },
+                    # The field sheets exist by now, so packing can genuinely
+                    # cut in before border work has even started.
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Start Packing"},
+                        "action_id": "trk_start_packing",
+                        "value": str(task_id)
                     }
                 ]
             }
         ]
     )
-    
+
     database.update_message_ts(task_id, result["channel"], result["ts"])
-    
+
 @app.action("trk_no_border")
 def handle_no_border(ack, body, client):
     """
@@ -1139,9 +1390,14 @@ def handle_undo_no_border(ack, body, client):
     if outcome != "reverted":
         if outcome == "border_skip_not_reversible":
             text = (
-                "Packing has already started on this job, so the border cannot "
-                "be reopened from here. Nothing has been changed. Add what "
-                "happened to the job's notes and tell a supervisor."
+                "Packing has already been finished on this job, so the border "
+                "cannot be reopened from here. Nothing has been changed. Add "
+                "what happened to the job's notes and tell a supervisor."
+            )
+        elif outcome == "another_phase_running":
+            text = (
+                "The packing timer is running on this job. Stop it first, then "
+                "press 'Border after all' again. Nothing has been changed."
             )
         elif outcome == "border_not_skipped":
             text = "This job is not marked 'No Border', so there is nothing to undo."
@@ -1153,6 +1409,13 @@ def handle_undo_no_border(ack, body, client):
     updated_task = database.get_task(task_id)
     field_time = database.format_elapsed(updated_task["field_elapsed"])
     field_jig_line = f"*Jig Size:* {updated_task['field_jigs']}\n" if updated_task["field_jigs"] else ""
+    # Packing may already have been worked before the border came to light.
+    # That time is real and keeps counting toward the job - showing it here
+    # says so, instead of leaving the maker wondering where it went.
+    packing_line = (
+        f"*Packing Time So Far:* {database.format_elapsed(updated_task['packing_elapsed'])}\n"
+        if updated_task["packing_elapsed"] else ""
+    )
 
     client.chat_delete(channel=channel_id, ts=task["message_ts"])
 
@@ -1176,6 +1439,7 @@ def handle_undo_no_border(ack, body, client):
                         f"*Due:* {updated_task['due_date']}\n"
                         f"*Created by:* <@{updated_task['user_id']}>\n"
                         f"*Field Sheeting Time:* {field_time}\n"
+                        f"{packing_line}"
                         f"*Status:* No Border undone — press Complete Phase for "
                         f"the border details"
                     )
@@ -1232,6 +1496,12 @@ def handle_packing_submission(ack, body, client):
     task = database.get_task(task_id)
     field_time = database.format_elapsed(task["field_elapsed"])
     border_time = border_time_display(task)
+    # Packing worked earlier as an interruption arrives here with time already
+    # on the clock. Shown, so the maker knows it counted.
+    packing_line = (
+        f"*Packing Time So Far:* {database.format_elapsed(task['packing_elapsed'])}\n"
+        if task["packing_elapsed"] else ""
+    )
 
     # The border route deleted the old card before opening this modal. The No
     # Border route deliberately did not, so that cancelling left the maker on a
@@ -1244,10 +1514,11 @@ def handle_packing_submission(ack, body, client):
             # Already gone is the outcome this wanted anyway.
             pass
 
-    # The way back, offered only while there is a way back: once packing has
-    # any time against it the border cannot be reopened without the flexible
-    # phase work that packing interruption brings, and a button that always
-    # refuses is worse than no button.
+    # The way back, offered only while there is a way back. A phase can wait
+    # paused while other work happens, so packing time on the clock does not
+    # close the border question - only FINISHING the packing does. Until then
+    # the button stays, and a button that always refuses is worse than no
+    # button.
     packing_actions = [
         {
             "type": "button",
@@ -1257,7 +1528,7 @@ def handle_packing_submission(ack, body, client):
             "value": str(task_id)
         }
     ]
-    if task.get("border_skipped") and not task.get("packing_begun"):
+    if task.get("border_skipped") and not task.get("packing_finished"):
         packing_actions.append({
             "type": "button",
             "text": {"type": "plain_text", "text": "Border after all"},
@@ -1281,6 +1552,7 @@ def handle_packing_submission(ack, body, client):
                         f"*Task:* {task['task_description']}\n"
                         f"*Field Sheeting Time:* {field_time}\n"
                         f"*Border Sheeting Time:* {border_time}\n"
+                        f"{packing_line}"
                         f"*Created by:* <@{task['user_id']}>\n"
                         f"*Status:* Created"
                     )
@@ -1612,6 +1884,24 @@ def handle_add_jig_submission(ack, body, client):
                 "value": str(task_id)
             }
         ]
+    # Keep Start Packing through a jig add, the same way Add Jig itself is
+    # kept - a recorded jig must not cost the card a button it had.
+    if phase in ("field_sheeting", "border_sheeting") and not task.get("packing_finished"):
+        buttons.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Start Packing"},
+            "action_id": "trk_start_packing",
+            "value": str(task_id)
+        })
+    # And keep the way back on a paused No Border packing card, for the same
+    # reason.
+    if phase == "packing" and not running and task.get("border_skipped") and not task.get("packing_finished"):
+        buttons.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Border after all"},
+            "action_id": "trk_undo_no_border",
+            "value": str(task_id)
+        })
     buttons.append({
         "type": "button",
         "text": {"type": "plain_text", "text": "Add Jig"},
@@ -1923,6 +2213,23 @@ def handle_edit_submission(ack, body, client):
                 "value": str(task_id)
             }
         ]
+        # Keep Start Packing through an edit for the same reason Add Jig is
+        # kept below - saving an edit must not cost the card a button it had.
+        if task["current_phase"] in ("field_sheeting", "border_sheeting") and not task.get("packing_finished"):
+            buttons.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Start Packing"},
+                "action_id": "trk_start_packing",
+                "value": str(task_id)
+            })
+        # And the way back on a paused No Border packing card, likewise.
+        if task["current_phase"] == "packing" and task.get("border_skipped") and not task.get("packing_finished"):
+            buttons.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Border after all"},
+                "action_id": "trk_undo_no_border",
+                "value": str(task_id)
+            })
         # Keep the Add Jig button through an edit - without this, saving an
         # edit on a paused sheeting card would silently drop it until the
         # next stop or resume
