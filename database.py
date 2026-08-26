@@ -367,12 +367,33 @@ def _legacy_status(job, phases):
         # from it — answering "created" would rebuild the card without a
         # Complete button and strand anyone who edits at that moment.
         return "completed"
+    if state == "skipped":
+        # A lane that did not happen is finished with, so the card reads the
+        # same as a completed one. Unreachable in the normal flow, where the
+        # cursor never rests on a skipped border, but a card rebuilt from a
+        # stale cursor must not fall through to "created" and offer Start on a
+        # lane that can never be timed.
+        return "completed"
     return "created"
 
 
 def _phase_of(phases, name, field):
     row = next((p for p in phases if p.get("phase") == name), None)
     return (row or {}).get(field)
+
+
+def _packing_begun(phases, packing_seconds):
+    """
+    Has packing actually started?
+
+    Asked of the lane state rather than the clock, because a packing lane can
+    begin and be stopped again inside the same second and still plainly have
+    begun. The seconds are kept as a second opinion only.
+    """
+    state = _phase_of(phases, "packing", "state")
+    if state and state != "not_started":
+        return True
+    return int(packing_seconds or 0) > 0
 
 
 def _jigs_of(view, phase_name):
@@ -428,6 +449,12 @@ def _row(view, timing):
         "border_elapsed": border,
         "border_jigs": _jig_display(border_jig_records),
         "border_jig_records": border_jig_records,
+        # A skipped border and a border worked for no measurable time both sum
+        # to zero seconds, so nothing else in this dict can tell them apart.
+        # The lane state is carried explicitly, and every border rendering
+        # keys off it.
+        "border_skipped": _phase_of(phases, "border_sheeting", "state") == "skipped",
+        "packing_begun": _packing_begun(phases, packing),
         "packing_elapsed": packing,
         "general_notes": job.get("generalNotes"),
         "issues_encountered": job.get("issuesEncountered"),
@@ -635,6 +662,20 @@ def move_to_border_phase(task_id, border_design, border_difficulty, border_jig=N
     view, row = resolved
     job_id = view["job"]["id"]
     actor = f"slack:{row['user_id']}"
+
+    # Filling this form in IS the statement that there is a border after all.
+    # A job previously marked "no border" is therefore put back first, as its
+    # own audited step: taking the decision back and describing the border are
+    # two different facts, and the history should show both. If the border
+    # cannot be put back - packing has already started - the refusal is raised
+    # rather than swallowed, because writing border details onto a lane that is
+    # still recorded as skipped would be refused anyway, silently, and the
+    # maker would be left believing the form saved.
+    if row.get("border_skipped"):
+        outcome = _post_border_skip_revert(job_id, actor, "move_to_border_phase_unskip")
+        if outcome != "reverted":
+            raise TrackerRefused(outcome)
+
     details = {
         "phase": "border_sheeting",
         "designName": border_design,
@@ -660,13 +701,96 @@ def move_to_packing_phase(task_id):
 
     The packing modal collects nothing, so where the maker now is IS the whole
     of what this submission records.
+
+    Returns "moved", or the reason it did not. A maker with Slack open twice can
+    take a "no border" back on one surface while this form is still sitting open
+    on the other, and a form opened before that correction must not carry the
+    job past a border nobody has decided about. LMSA refuses that; handing the
+    reason back is what lets the handler say so, instead of the refusal
+    disappearing into an unhandled error the maker never sees.
+    """
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return None
+    view, row = resolved
+    try:
+        _advance_cursor(
+            view["job"]["id"], "packing", f"slack:{row['user_id']}", "move_to_packing_phase"
+        )
+    except TrackerRefused as refusal:
+        return refusal.reason
+    return "moved"
+
+
+def skip_border_phase(task_id):
+    """
+    Record that this job has no border.
+
+    One call, and deliberately not two: unlike move_to_border_phase this does
+    NOT advance the cursor. The cursor moves when the packing modal that
+    follows is submitted, exactly as it would have after the border modal. The
+    two answers to the same question therefore have the same shape, and while
+    the maker has not moved on the decision costs nothing to take back.
+
+    phase_already_skipped is tolerated for the same reason already_processed
+    is: a redelivered click must not show an error to a maker who did nothing
+    wrong. Nothing else is swallowed. A refusal that means the skip did not
+    happen has to reach the handler, because the handler is what tells the
+    maker.
     """
     resolved = _row_for(task_id)
     if resolved is None:
         return
     view, row = resolved
-    _advance_cursor(
-        view["job"]["id"], "packing", f"slack:{row['user_id']}", "move_to_packing_phase"
+    try:
+        _call("POST", f"/jobs/{view['job']['id']}/phases/border-skip", {
+            "actor": f"slack:{row['user_id']}",
+        }, operation="skip_border_phase")
+    except TrackerRefused as refusal:
+        if refusal.reason not in ("phase_already_skipped", "already_processed"):
+            raise
+
+
+def _post_border_skip_revert(job_id, actor, operation):
+    """
+    Put a border that was marked "no border" back to undecided.
+
+    Returns "reverted" or the refusal reason. Never swallows: both callers need
+    to know, because a correction that quietly did nothing is worse than an
+    error - the card would be rebuilt as though the border were back while the
+    record still said skipped.
+    """
+    try:
+        _call("POST", f"/jobs/{job_id}/phases/border-skip/revert", {
+            "actor": actor,
+        }, operation=operation)
+    except TrackerRefused as refusal:
+        if refusal.reason == "already_processed":
+            return "reverted"
+        return refusal.reason
+    return "reverted"
+
+
+def revert_border_skip(task_id):
+    """
+    Take back a "no border" chosen by mistake, and SAY what happened.
+
+    This one hands its refusal back instead of swallowing it. A correction that
+    quietly did nothing is worse than an error: the handler would rebuild a
+    card claiming the border is back while the record still says skipped, and
+    the maker would carry on believing it. The handler turns the reason into
+    something readable.
+
+    Returns "reverted", or the refusal reason, or None when the job could not
+    be resolved at all. A replayed click reports "reverted", because the first
+    delivery of it did exactly that.
+    """
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return None
+    view, row = resolved
+    return _post_border_skip_revert(
+        view["job"]["id"], f"slack:{row['user_id']}", "revert_border_skip"
     )
 
 

@@ -167,3 +167,55 @@ LMSA side: a new tracker.phase_jig_sizes table (0..many ordered values per
 phase), two API operations (add, correct) with the usual audit and replay
 protection, and the completed/export projection. Arrived in the single
 feature commit on feature/jig-size, merged into feature/lmsa-integration.
+## No Border (2026-08-26)
+
+Some jobs genuinely have no border. Until now the only way to get such a job
+past the border was to complete the border phase, which recorded a phase that
+was worked for zero seconds - indistinguishable, on every card and in the
+export, from a border that really was worked and happened to be quick.
+
+What changed for a maker:
+
+- The Border details form gained a **No Border** button next to the design and
+  difficulty boxes. It is offered at that moment and nowhere else: the job
+  paper does not always say whether there is a border, but by the time field
+  sheeting is finished the maker knows. Intake is deliberately left alone.
+- Choosing it turns the same form into the Packing one, so the job carries
+  straight on. The team channel gets a line saying the job has no border, the
+  same way it gets one when a phase finishes.
+- Everywhere a border time would be shown - the packing card, the finished-job
+  summary, the Excel export - a job with no border now says **No Border**
+  instead of "0 h 0m 0s".
+- Add Jig stops offering Border on such a job. There was no border, so there
+  was no jig.
+
+Changed your mind:
+
+- Cancelling the Packing form leaves everything as it was, on a live card. Press
+  Complete Phase again and the Border details form comes back, exactly as it
+  does when any modal is cancelled.
+- Once the Packing card is showing, it carries a **Border after all** button
+  while nothing has been packed yet. That puts the job back at the border
+  details step.
+- Once packing has genuinely started, the button is gone and the correction is
+  refused with a message explaining why. Reopening a border while packing time
+  is already running needs one phase paused while another is worked, which is
+  the packing-interruption behaviour that has not been built yet. It refuses
+  out loud rather than quietly doing nothing.
+
+The record of what happened is kept either way: choosing no border and taking
+it back are both written to the job's history, with who and when. Taking it
+back does not erase the original choice.
+
+Agreed with Luis beforehand: yes - "some jobs genuinely have no Border, add an
+explicit No Border path, do not generalise it into skipping any phase" was
+confirmed in the creator review. It is Border-only for exactly that reason.
+Tom settled the two questions the review left open: where the maker is asked,
+and how a mistake is corrected.
+
+LMSA side: the border phase row is marked `skipped` rather than completed, so
+the database itself refuses to give it a completion time and no reader can
+mistake it for a zero-length border. Two API operations (skip, and revert)
+with the usual audit and replay protection, a job can now finish with a skipped
+border, and a skipped border cannot be started, completed, given details or
+given a jig. Arrived in the single feature commit on `feature/no-border`.

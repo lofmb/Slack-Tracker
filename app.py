@@ -26,6 +26,45 @@ app = App(
     listener_executor=database.listener_executor()
 )
 
+def packing_modal_view(metadata, summary_text):
+    """
+    The Packing form.
+
+    Two paths reach it - the border phase finishing, and a job that turns out
+    to have no border at all - and they differ only in the few lines of summary
+    above the button. Defined here once so both say the same thing, and so a
+    change to the form cannot land on one path and miss the other.
+    """
+    return {
+        "type": "modal",
+        "callback_id": "trk_packing_modal",
+        "title": {"type": "plain_text", "text": "Packing (Phase 3)"},
+        "submit": {"type": "plain_text", "text": "Start Packing Phase"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "private_metadata": metadata,
+        "blocks": [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": summary_text}
+            }
+        ]
+    }
+
+
+def border_time_display(task):
+    """
+    What to show wherever a border time would go.
+
+    A job with no border has no border time. Printing "0 h 0m 0s" would read as
+    a border that was worked and happened to take no time, which is a different
+    thing and the wrong thing. Every border time on a card, in the summary and
+    in the export goes through here so they all say it the same way.
+    """
+    if task.get("border_skipped"):
+        return "No Border"
+    return database.format_elapsed(task["border_elapsed"] or 0)
+
+
 @app.middleware
 def track_slack_delivery(body, next):
     # Note which Slack delivery is being handled, so a redelivery of the same
@@ -251,10 +290,10 @@ def handle_export(body, client):
             # Several jigs show as one readable cell, e.g. "49.6 / 50"
             task["field_jigs"] or "-",
             database.format_elapsed(field_elapsed),
-            task["border_design"] or "-",
-            task["border_difficulty"] or "-",
-            task["border_jigs"] or "-",
-            database.format_elapsed(border_elapsed),
+            "No Border" if task.get("border_skipped") else (task["border_design"] or "-"),
+            "-" if task.get("border_skipped") else (task["border_difficulty"] or "-"),
+            "-" if task.get("border_skipped") else (task["border_jigs"] or "-"),
+            border_time_display(task),
             database.format_elapsed(packing_elapsed),
             database.format_elapsed(total_elapsed),
             task["general_notes"] or "None",
@@ -557,7 +596,7 @@ def handle_start(ack, body, client):
         
     elif phase == "packing":
         field_time = database.format_elapsed(task["field_elapsed"])
-        border_time = database.format_elapsed(task["border_elapsed"])
+        border_time = border_time_display(task)
         # Packing is not a jig phase itself, so its lines say which phase
         # each jig belongs to
         named_field_jig_line = f"*Field Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
@@ -837,6 +876,22 @@ def handle_complete(ack, body, client):
                             "action_id": "border_jig",
                             "placeholder": {"type": "plain_text", "text": "e.g. 49.6 or template"}
                         }
+                    },
+                    # Some jobs genuinely have no border. This is the moment the
+                    # maker knows that, so it is the moment they are asked - it
+                    # is deliberately not on the intake form, where it would be
+                    # one more thing to answer before the job can start.
+                    {
+                        "type": "actions",
+                        "block_id": "no_border_block",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "No Border"},
+                                "action_id": "trk_no_border",
+                                "value": str(task_id)
+                            }
+                        ]
                     }
                 ]
             }
@@ -861,28 +916,15 @@ def handle_complete(ack, body, client):
         
         client.views_open(
             trigger_id=body["trigger_id"],
-            view={
-                    "type": "modal",
-                    "callback_id": "trk_packing_modal",
-                "title": {"type": "plain_text", "text": "Packing (Phase 3)"},
-                "submit": {"type": "plain_text", "text": "Start Packing Phase"},
-                "close": {"type": "plain_text", "text": "Cancel"},
-                "private_metadata": metadata,
-                "blocks":[
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": (
-                                f"*Border Sheeting Complete!*\n"
-                                f"Field Sheeting Time: *{field_time}*\n"
-                                f"Border Sheeting Time: *{border_time}*\n"
-                                f"Click 'Start Packing Phase' when you're ready"
-                            )
-                        }
-                    }
-                ]
-            }
+            view=packing_modal_view(
+                metadata,
+                (
+                    f"*Border Sheeting Complete!*\n"
+                    f"Field Sheeting Time: *{field_time}*\n"
+                    f"Border Sheeting Time: *{border_time}*\n"
+                    f"Click 'Start Packing Phase' when you're ready"
+                )
+            )
         )
     
     elif phase == "packing":
@@ -999,6 +1041,171 @@ def handle_border_submission(ack,body, client):
     
     database.update_message_ts(task_id, result["channel"], result["ts"])
     
+@app.action("trk_no_border")
+def handle_no_border(ack, body, client):
+    """
+    The maker says this job has no border.
+
+    Records the decision and turns the same modal into the packing one, so the
+    job carries straight on. The DM card is deliberately NOT touched here: the
+    cursor stays on field until the packing modal is submitted, so cancelling
+    at this point leaves the maker exactly where they were, with the border
+    decision still open on a live card.
+    """
+    ack()
+    metadata = json.loads(body["view"]["private_metadata"])
+    task_id = metadata["task_id"]
+    dm_channel_id = metadata["dm_channel_id"]
+    team_channel_id = metadata["team_channel_id"]
+    user_id = body["user"]["id"]
+
+    task = database.get_task(task_id)
+
+    if task is None:
+        client.chat_postEphemeral(
+            channel=dm_channel_id,
+            user=user_id,
+            text="Task not found. It may have been deleted."
+        )
+        return
+
+    if task["user_id"] != user_id:
+        client.chat_postEphemeral(
+            channel=dm_channel_id,
+            user=user_id,
+            text="You can only control your own tasks."
+        )
+        return
+
+    database.skip_border_phase(task_id)
+
+    updated_task = database.get_task(task_id)
+    field_time = database.format_elapsed(updated_task["field_elapsed"])
+
+    client.chat_postMessage(
+        channel=team_channel_id,
+        text=f" *T-{task_id} - No Border on this job* | <@{user_id}>"
+    )
+
+    client.views_update(
+        view_id=body["view"]["id"],
+        view=packing_modal_view(
+            json.dumps(metadata),
+            (
+                f"*No Border on this job.*\n"
+                f"Field Sheeting Time: *{field_time}*\n"
+                f"Click 'Start Packing Phase' when you're ready.\n\n"
+                f"_Chose this by mistake? Cancel, then press Complete Phase "
+                f"again to get the border details form back._"
+            )
+        )
+    )
+
+
+@app.action("trk_undo_no_border")
+def handle_undo_no_border(ack, body, client):
+    """
+    Take back a "No Border" from the packing card.
+
+    The refusal is shown, never hidden. If the correction did not happen the
+    card is left exactly as it was: rebuilding it as though it had worked would
+    leave the maker believing they have a border phase back when the record
+    still says the border was skipped.
+    """
+    ack()
+    task_id = int(body["actions"][0]["value"])
+    user_id = body["user"]["id"]
+    channel_id = body["container"]["channel_id"]
+    task = database.get_task(task_id)
+
+    if task is None:
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text="Task not found. It may have been deleted."
+        )
+        return
+
+    if task["user_id"] != user_id:
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text="You can only control your own tasks."
+        )
+        return
+
+    outcome = database.revert_border_skip(task_id)
+
+    if outcome != "reverted":
+        if outcome == "border_skip_not_reversible":
+            text = (
+                "Packing has already started on this job, so the border cannot "
+                "be reopened from here. Nothing has been changed. Add what "
+                "happened to the job's notes and tell a supervisor."
+            )
+        elif outcome == "border_not_skipped":
+            text = "This job is not marked 'No Border', so there is nothing to undo."
+        else:
+            text = "That could not be undone, so nothing has been changed."
+        client.chat_postEphemeral(channel=channel_id, user=user_id, text=text)
+        return
+
+    updated_task = database.get_task(task_id)
+    field_time = database.format_elapsed(updated_task["field_elapsed"])
+    field_jig_line = f"*Jig Size:* {updated_task['field_jigs']}\n" if updated_task["field_jigs"] else ""
+
+    client.chat_delete(channel=channel_id, ts=task["message_ts"])
+
+    result = client.chat_postMessage(
+        channel=channel_id,
+        text=f"Task T-{task_id} is back at the border details step.",
+        blocks=[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*Phase 1/4: Field Sheeting — Complete*\n"
+                        f"*ID:* T-{task_id}\n"
+                        f"*Customer:* {updated_task['customer_name']}\n"
+                        f"*Invoice:* {updated_task['invoice_number']}\n"
+                        f"*Task:* {updated_task['task_description']}\n"
+                        f"*Field Design:* {updated_task['field_design']}\n"
+                        f"*Difficulty:* {updated_task['difficulty']}\n"
+                        f"{field_jig_line}"
+                        f"*Due:* {updated_task['due_date']}\n"
+                        f"*Created by:* <@{updated_task['user_id']}>\n"
+                        f"*Field Sheeting Time:* {field_time}\n"
+                        f"*Status:* No Border undone — press Complete Phase for "
+                        f"the border details"
+                    )
+                }
+            },
+            {
+                "type": "actions",
+                "block_id": f"task_actions_{task_id}",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Complete Phase"},
+                        "style": "primary",
+                        "action_id": "trk_complete_task",
+                        "value": str(task_id)
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Add Jig"},
+                        "action_id": "trk_add_jig",
+                        "value": str(task_id)
+                    }
+                ]
+            }
+        ]
+    )
+
+    database.update_message_ts(task_id, result["channel"], result["ts"])
+
+
 @app.view("trk_packing_modal")
 def handle_packing_submission(ack, body, client):
     ack()
@@ -1008,10 +1215,55 @@ def handle_packing_submission(ack, body, client):
     dm_channel_id = metadata["dm_channel_id"]
     team_channel_id = metadata ["team_channel_id"]
 
-    database.move_to_packing_phase(task_id)
+    outcome = database.move_to_packing_phase(task_id)
+    if outcome != "moved":
+        # This form was opened before something else changed the job - most
+        # likely the border was put back on another device. Say so and change
+        # nothing; the job's card is still live and still correct.
+        client.chat_postEphemeral(
+            channel=dm_channel_id,
+            user=user_id,
+            text=("This job's border has changed since this form was opened, so it "
+                  "has not been moved to Packing and nothing has been changed. "
+                  "Go back to the job's card and carry on from there.")
+        )
+        return
+
     task = database.get_task(task_id)
     field_time = database.format_elapsed(task["field_elapsed"])
-    border_time = database.format_elapsed(task["border_elapsed"])
+    border_time = border_time_display(task)
+
+    # The border route deleted the old card before opening this modal. The No
+    # Border route deliberately did not, so that cancelling left the maker on a
+    # live card with the decision still open - so clear it here, now that they
+    # have committed to packing.
+    if task.get("border_skipped") and task.get("message_ts"):
+        try:
+            client.chat_delete(channel=dm_channel_id, ts=task["message_ts"])
+        except SlackApiError:
+            # Already gone is the outcome this wanted anyway.
+            pass
+
+    # The way back, offered only while there is a way back: once packing has
+    # any time against it the border cannot be reopened without the flexible
+    # phase work that packing interruption brings, and a button that always
+    # refuses is worse than no button.
+    packing_actions = [
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Start"},
+            "style": "primary",
+            "action_id": "trk_start_task",
+            "value": str(task_id)
+        }
+    ]
+    if task.get("border_skipped") and not task.get("packing_begun"):
+        packing_actions.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Border after all"},
+            "action_id": "trk_undo_no_border",
+            "value": str(task_id)
+        })
 
     result = client.chat_postMessage(
         channel=dm_channel_id,
@@ -1037,15 +1289,7 @@ def handle_packing_submission(ack, body, client):
             {
                 "type": "actions",
                 "block_id": f"task_actions_{task_id}",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Start"},
-                        "style": "primary",
-                        "action_id": "trk_start_task",
-                        "value": str(task_id)
-                    }
-                ]
+                "elements": packing_actions
             }
         ]
     )
@@ -1072,7 +1316,7 @@ def handle_notes_submission(ack,body,client):
 
     elapsed = database.get_phase_elapsed(task_id)
     field_time = database.format_elapsed(elapsed["field_elapsed"])
-    border_time = database.format_elapsed(elapsed["border_elapsed"])
+    border_time = border_time_display(task)
     packing_time = database.format_elapsed(elapsed["packing_elapsed"])
     total_time = database.format_elapsed(elapsed["total_elapsed"])
 
@@ -1192,12 +1436,17 @@ def handle_add_jig(ack, body, client):
             "text": {"type": "plain_text", "text": "Border"},
             "value": "border_sheeting"
         }
+        # A border that did not happen used no jig, and storage refuses one,
+        # so it is not offered - a choice that always errors is worse than no
+        # choice.
         phase_element = {
             "type": "static_select",
             "action_id": "jig_phase",
             "placeholder": {"type": "plain_text", "text": "Field or Border?"},
-            "options": [field_option, border_option]
+            "options": [field_option] if task.get("border_skipped") else [field_option, border_option]
         }
+        if task.get("border_skipped"):
+            phase_element["initial_option"] = field_option
         # On the Border card the border is the usual answer, so it is
         # pre-picked; from Packing there is no obvious answer, so the maker
         # must choose
@@ -1307,7 +1556,7 @@ def handle_add_jig_submission(ack, body, client):
         # The packing card is not a jig phase itself, so its lines say which
         # phase each jig belongs to
         field_time = database.format_elapsed(task["field_elapsed"])
-        border_time = database.format_elapsed(task["border_elapsed"])
+        border_time = border_time_display(task)
         named_field_line = f"*Field Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
         named_border_line = f"*Border Jig Size:* {task['border_jigs']}\n" if task["border_jigs"] else ""
         card_text = (
