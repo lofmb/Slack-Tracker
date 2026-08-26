@@ -558,12 +558,18 @@ def handle_start(ack, body, client):
     elif phase == "packing":
         field_time = database.format_elapsed(task["field_elapsed"])
         border_time = database.format_elapsed(task["border_elapsed"])
+        # Packing is not a jig phase itself, so its lines say which phase
+        # each jig belongs to
+        named_field_jig_line = f"*Field Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
+        named_border_jig_line = f"*Border Jig Size:* {task['border_jigs']}\n" if task["border_jigs"] else ""
         card_text = (
             f"*Phase 3/4: Packing - In Progress*\n"
             f"*ID:* T-{task_id}\n"
             f"*Customer:* {task['customer_name']}\n"
             f"*Invoice:* {task['invoice_number']}\n"
             f"*Task:* {task['task_description']}\n"
+            f"{named_field_jig_line}"
+            f"{named_border_jig_line}"
             f"*Created by:* <@{task['user_id']}>\n"
             f"*Field Sheeting Time:* {field_time}\n"
             f"*Border Sheeting Time:* {border_time}\n"
@@ -589,8 +595,9 @@ def handle_start(ack, body, client):
         }
     ]
 
-    # Only the sheeting phases use a jig, so only their cards offer the button
-    if phase in ("field_sheeting", "border_sheeting"):
+    # Every working card offers Add Jig - from Border onwards the modal asks
+    # which phase used it, so a late Field jig has a supported route in
+    if phase in ("field_sheeting", "border_sheeting", "packing"):
         buttons.append({
             "type": "button",
             "text": {"type": "plain_text", "text": "Add Jig"},
@@ -681,12 +688,18 @@ def handle_stop(ack, body, client):
     
     else:
         elapsed = database.format_elapsed(updated_task["packing_elapsed"])
+        # Packing is not a jig phase itself, so its lines say which phase
+        # each jig belongs to
+        named_field_jig_line = f"*Field Jig Size:* {updated_task['field_jigs']}\n" if updated_task["field_jigs"] else ""
+        named_border_jig_line = f"*Border Jig Size:* {updated_task['border_jigs']}\n" if updated_task["border_jigs"] else ""
         card_text = (
             f"*Phase 3/4: Packing — Paused*\n"
             f"*ID:* T-{task_id}\n"
             f"*Customer:* {task['customer_name']}\n"
             f"*Invoice:* {task['invoice_number']}\n"
             f"*Task:* {task['task_description']}\n"
+            f"{named_field_jig_line}"
+            f"{named_border_jig_line}"
             f"*Created by:* <@{task['user_id']}>\n"
             f"*Status:* Paused\n"
             f"*Packing Time So Far:* {elapsed}"
@@ -714,8 +727,9 @@ def handle_stop(ack, body, client):
         }
     ]
 
-    # Only the sheeting phases use a jig, so only their cards offer the button
-    if phase in ("field_sheeting", "border_sheeting"):
+    # Every working card offers Add Jig - from Border onwards the modal asks
+    # which phase used it, so a late Field jig has a supported route in
+    if phase in ("field_sheeting", "border_sheeting", "packing"):
         buttons.append({
             "type": "button",
             "text": {"type": "plain_text", "text": "Add Jig"},
@@ -1148,20 +1162,63 @@ def handle_add_jig(ack, body, client):
         )
         return
 
-    # The button lives on the Field and Border cards, but a stale card could
-    # still be clicked after the job moved on - packing has no jig.
+    # Jigs can be added as long as the job is open. A finished job has no
+    # card with this button, but a stale one could still be clicked.
     phase = task["current_phase"]
-    if phase not in ("field_sheeting", "border_sheeting"):
+    if phase == "completed":
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text="Jigs belong to the Field or Border phase - this job has moved past those."
+            text="This job is finished - jigs can no longer be added."
         )
         return
 
-    # Remember which phase the button was pressed from, so the new jig lands
-    # on the right one
+    # Remember which phase the card was on, so the right card comes back
+    # after the modal
     metadata = json.dumps({"task_id": task_id, "channel_id": channel_id, "phase": phase})
+
+    # During Field there is only one place a jig can go. From Border onwards
+    # the maker chooses, because sometimes Field work genuinely has to
+    # continue with another jig AFTER Field was completed - that is still an
+    # added jig, not a correction, and the earlier one must stay. The Border
+    # phase is offered once the maker has reached it.
+    blocks = []
+    if phase != "field_sheeting":
+        field_option = {
+            "text": {"type": "plain_text", "text": "Field"},
+            "value": "field_sheeting"
+        }
+        border_option = {
+            "text": {"type": "plain_text", "text": "Border"},
+            "value": "border_sheeting"
+        }
+        phase_element = {
+            "type": "static_select",
+            "action_id": "jig_phase",
+            "placeholder": {"type": "plain_text", "text": "Field or Border?"},
+            "options": [field_option, border_option]
+        }
+        # On the Border card the border is the usual answer, so it is
+        # pre-picked; from Packing there is no obvious answer, so the maker
+        # must choose
+        if phase == "border_sheeting":
+            phase_element["initial_option"] = border_option
+        blocks.append({
+            "type": "input",
+            "block_id": "phase_block",
+            "label": {"type": "plain_text", "text": "Which phase used it?"},
+            "element": phase_element
+        })
+    blocks.append({
+        "type": "input",
+        "block_id": "jig_block",
+        "label": {"type": "plain_text", "text": "Jig Size (mm)"},
+        "element": {
+            "type": "plain_text_input",
+            "action_id": "jig_size",
+            "placeholder": {"type": "plain_text", "text": "e.g. 49.6 or template"}
+        }
+    })
 
     client.views_open(
         trigger_id=body["trigger_id"],
@@ -1172,18 +1229,7 @@ def handle_add_jig(ack, body, client):
             "submit": {"type": "plain_text", "text": "Add"},
             "close": {"type": "plain_text", "text": "Cancel"},
             "private_metadata": metadata,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "jig_block",
-                    "label": {"type": "plain_text", "text": "Jig Size (mm)"},
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "jig_size",
-                        "placeholder": {"type": "plain_text", "text": "e.g. 49.6 or template"}
-                    }
-                }
-            ]
+            "blocks": blocks
         }
     )
 
@@ -1201,7 +1247,14 @@ def handle_add_jig_submission(ack, body, client):
     if not jig_size:
         return
 
-    database.add_jig(task_id, phase, jig_size)
+    # The dropdown says which phase used the jig; when the modal had no
+    # dropdown the job was still on Field, so Field it is
+    if "phase_block" in vals:
+        target_phase = vals["phase_block"]["jig_phase"]["selected_option"]["value"]
+    else:
+        target_phase = "field_sheeting"
+
+    database.add_jig(task_id, target_phase, jig_size)
     task = database.get_task(task_id)
 
     # The job can disappear between opening the modal and submitting it -
@@ -1235,7 +1288,7 @@ def handle_add_jig_submission(ack, body, client):
             f"*Created by:* <@{task['user_id']}>\n"
             f"*Status:* {status_text}"
         )
-    else:
+    elif phase == "border_sheeting":
         field_time = database.format_elapsed(task["field_elapsed"])
         card_text = (
             f"*Phase 2/4: Border Sheeting — {status_text}*\n"
@@ -1248,6 +1301,26 @@ def handle_add_jig_submission(ack, body, client):
             f"{border_jig_line}"
             f"*Created by:* <@{task['user_id']}>\n"
             f"*Field Sheeting Time:* {field_time}\n"
+            f"*Status:* {status_text}"
+        )
+    else:
+        # The packing card is not a jig phase itself, so its lines say which
+        # phase each jig belongs to
+        field_time = database.format_elapsed(task["field_elapsed"])
+        border_time = database.format_elapsed(task["border_elapsed"])
+        named_field_line = f"*Field Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
+        named_border_line = f"*Border Jig Size:* {task['border_jigs']}\n" if task["border_jigs"] else ""
+        card_text = (
+            f"*Phase 3/4: Packing — {status_text}*\n"
+            f"*ID:* T-{task_id}\n"
+            f"*Customer:* {task['customer_name']}\n"
+            f"*Invoice:* {task['invoice_number']}\n"
+            f"*Task:* {task['task_description']}\n"
+            f"{named_field_line}"
+            f"{named_border_line}"
+            f"*Created by:* <@{task['user_id']}>\n"
+            f"*Field Sheeting Time:* {field_time}\n"
+            f"*Border Sheeting Time:* {border_time}\n"
             f"*Status:* {status_text}"
         )
 
@@ -1604,7 +1677,7 @@ def handle_edit_submission(ack, body, client):
         # Keep the Add Jig button through an edit - without this, saving an
         # edit on a paused sheeting card would silently drop it until the
         # next stop or resume
-        if task["current_phase"] in ("field_sheeting", "border_sheeting"):
+        if task["current_phase"] in ("field_sheeting", "border_sheeting", "packing"):
             buttons.append({
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Add Jig"},

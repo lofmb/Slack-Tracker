@@ -143,10 +143,14 @@ The first agreed post-baseline feature. What changed for a maker:
   "Jig Size (mm)" box. Usually a millimetre size like 49.6, but the box takes
   whatever is real - "49.4/49.8" and "template" are legitimate entries, so it
   is not restricted to numbers.
-- The Field and Border cards gained an "Add Jig" button for the times a phase
-  genuinely uses another jig - one swapped mid-run after a problem, or two
-  needed together. Add Jig ADDS a record next to the existing one; the jig
-  that was already used stays on the card, oldest first ("49.6 / 50").
+- Every working card (Field, Border and Packing) gained an "Add Jig" button
+  for the times a phase genuinely uses another jig - one swapped mid-run
+  after a problem, or two needed together. From the Border card onwards the
+  box asks which phase used it (Border is pre-picked on the Border card;
+  from Packing the maker chooses), so Field work that genuinely continued
+  AFTER Field was completed still gets its jig recorded properly. Add Jig
+  ADDS a record next to the existing one; the jig that was already used
+  stays on the card, oldest first ("49.6 / 50").
 - Edit now shows one pre-filled box per recorded jig, so a mistyped value can
   be corrected later - even after that phase has finished. A correction
   changes only the box it names, and LMSA keeps the old value in its audit
