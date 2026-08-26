@@ -1190,6 +1190,7 @@ def handle_add_jig(ack, body, client):
 @app.view("trk_add_jig_modal")
 def handle_add_jig_submission(ack, body, client):
     ack()
+    user_id = body["user"]["id"]
     vals = body["view"]["state"]["values"]
     metadata = json.loads(body["view"]["private_metadata"])
     task_id = metadata["task_id"]
@@ -1202,7 +1203,16 @@ def handle_add_jig_submission(ack, body, client):
 
     database.add_jig(task_id, phase, jig_size)
     task = database.get_task(task_id)
-    if task is None:
+
+    # The job can disappear between opening the modal and submitting it -
+    # deleted, or finished. Tell the maker instead of closing the modal in
+    # silence with their jig unrecorded, and leave the final card alone.
+    if task is None or task["current_phase"] == "completed":
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text=f"Jig '{jig_size}' was not recorded - the task is no longer open."
+        )
         return
 
     # Refresh the card so the maker sees every jig recorded so far
@@ -1591,10 +1601,23 @@ def handle_edit_submission(ack, body, client):
                 "value": str(task_id)
             }
         ]
+        # Keep the Add Jig button through an edit - without this, saving an
+        # edit on a paused sheeting card would silently drop it until the
+        # next stop or resume
+        if task["current_phase"] in ("field_sheeting", "border_sheeting"):
+            buttons.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Add Jig"},
+                "action_id": "trk_add_jig",
+                "value": str(task_id)
+            })
         status_text = "🟠 Paused"
 
-    # Jig line refreshed from the database, so it shows any corrections
-    field_jig_line = f"*Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
+    # Jig lines refreshed from the database, so they show any corrections.
+    # This card is not phase-specific, so each line names its phase - a
+    # border job's jig must not look wiped just because an edit was saved.
+    field_jig_line = f"*Field Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
+    border_jig_line = f"*Border Jig Size:* {task['border_jigs']}\n" if task["border_jigs"] else ""
 
     client.chat_update(
         channel=channel_id,
@@ -1614,6 +1637,7 @@ def handle_edit_submission(ack, body, client):
                         f"*Field Design:* {design}\n"
                         f"*Difficulty:* {difficulty}\n"
                         f"{field_jig_line}"
+                        f"{border_jig_line}"
                         f"*Due:* {due_date}\n"
                         f"*Created by:* <@{task['user_id']}>\n"
                         f"*Status:* {status_text}"
