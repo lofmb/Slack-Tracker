@@ -134,3 +134,32 @@ the receiving column (`job_events.idempotency_key`) already existed.
 
 Arrived in the commit that adds this entry, on `feature/listener-idempotency`,
 merged into `feature/lmsa-integration`.
+
+## Jig Size for Field and Border (2026-08-26)
+
+The first agreed post-baseline feature. What changed for a maker:
+
+- The Field details form and the Border details form each gained an optional
+  "Jig Size (mm)" box. Usually a millimetre size like 49.6, but the box takes
+  whatever is real - "49.4/49.8" and "template" are legitimate entries, so it
+  is not restricted to numbers.
+- The Field and Border cards gained an "Add Jig" button for the times a phase
+  genuinely uses another jig - one swapped mid-run after a problem, or two
+  needed together. Add Jig ADDS a record next to the existing one; the jig
+  that was already used stays on the card, oldest first ("49.6 / 50").
+- Edit now shows one pre-filled box per recorded jig, so a mistyped value can
+  be corrected later - even after that phase has finished. A correction
+  changes only the box it names, and LMSA keeps the old value in its audit
+  trail. Fixing a typo is Edit; a genuinely different jig is Add Jig.
+- The completed-job summary and the Excel export show the jig values for both
+  phases.
+
+Agreed with Luis beforehand: yes - jig size in millimetres for Field and
+Border, editable in later phases, changes audited, was confirmed in the
+creator review. Tom's workshop detail refined the shape afterwards: one phase
+can use several jigs, and the value cannot be numeric-only.
+
+LMSA side: a new tracker.phase_jig_sizes table (0..many ordered values per
+phase), two API operations (add, correct) with the usual audit and replay
+protection, and the completed/export projection. Arrived in the single
+feature commit on feature/jig-size, merged into feature/lmsa-integration.

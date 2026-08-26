@@ -207,9 +207,11 @@ def handle_export(body, client):
         "Due Date",
         "Field Design",
         "Field Difficulty",
+        "Field Jig Size(s)",
         "Field Sheeting Time",
         "Border Design",
         "Border Difficulty",
+        "Border Jig Size(s)",
         "Border Sheeting Time",
         "Packing Time",
         "Total Time",
@@ -246,9 +248,12 @@ def handle_export(body, client):
             task["due_date"] or "N/A",
             task["field_design"] or "-",
             task["difficulty"],
+            # Several jigs show as one readable cell, e.g. "49.6 / 50"
+            task["field_jigs"] or "-",
             database.format_elapsed(field_elapsed),
             task["border_design"] or "-",
             task["border_difficulty"] or "-",
+            task["border_jigs"] or "-",
             database.format_elapsed(border_elapsed),
             database.format_elapsed(packing_elapsed),
             database.format_elapsed(total_elapsed),
@@ -350,13 +355,22 @@ def handle_step_1(ack,body,client,):
         "close": {"type": "plain_text", "text": "Back"},
         "private_metadata": json.dumps(step1_data),
         "blocks": [
-            {"type": "input", "block_id": "design", "label": 
-                {"type": "plain_text", "text": "Field Design Name"}, 
+            {"type": "input", "block_id": "design", "label":
+                {"type": "plain_text", "text": "Field Design Name"},
                 "element":{"type": "plain_text_input", "action_id": "val"}
                 },
             {"type": "input", "block_id": "diff", "label":
                 {"type": "plain_text", "text": "Sheeting Difficulty"},
                 "element":{"type": "plain_text_input", "action_id": "difficulty", "max_length": 2}
+                },
+            # Usually a millimetre size like 49.6, but not always a clean
+            # number - "49.4/49.8" and "template" are real entries too, so the
+            # box takes whatever the maker types. Optional: not every job has
+            # the jig to hand when it is logged.
+            {"type": "input", "block_id": "jig_block", "optional": True, "label":
+                {"type": "plain_text", "text": "Jig Size (mm)"},
+                "element":{"type": "plain_text_input", "action_id": "jig_size",
+                    "placeholder": {"type": "plain_text", "text": "e.g. 49.6 or template"}}
                 }
         ]
     }
@@ -375,7 +389,8 @@ def handle_step_2(ack, body, client):
     # Collecting Step 2 values
     design = vals["design"]["val"]["value"]
     difficulty = vals["diff"]["difficulty"]["value"]
-    
+    jig_size = (vals["jig_block"]["jig_size"]["value"] or "").strip()
+
     # Saving the task to the database
     task_id = database.create_task(
         user_id=user_id,
@@ -386,11 +401,15 @@ def handle_step_2(ack, body, client):
         due_date=prev_data["due_date"],
         is_na=prev_data["is_na"],
         design=design,
-        difficulty=difficulty
+        difficulty=difficulty,
+        jig_size=jig_size
     )
     
     # Displaying due date on card
     due_display = "N/A" if prev_data["is_na"] else prev_data["due_date"]
+
+    # The jig line only appears once there is a jig to show
+    jig_line = f"*Jig Size:*\n{jig_size}\n" if jig_size else ""
 
     # chat_postMessage accepts a user id and resolves the DM itself, returning
     # the real D... conversation id in result["channel"]. conversations_open
@@ -412,6 +431,7 @@ def handle_step_2(ack, body, client):
                         f"*Task:*\n{prev_data['task_description']}\n"
                         f"*Field Design:*\n{design}\n"
                         f"*Difficulty:*\n{difficulty}\n"
+                        f"{jig_line}"
                         f"*Due:*\n{due_display}\n"
                         f"*Status:* Created"
                     )
@@ -499,7 +519,12 @@ def handle_start(ack, body, client):
 
     database.start_task(task_id)
     phase = task["current_phase"]
-    
+
+    # Jig lines only appear once a jig has been recorded, so old jobs with no
+    # jig look exactly as they always did
+    field_jig_line = f"*Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
+    border_jig_line = f"*Jig Size:* {task['border_jigs']}\n" if task["border_jigs"] else ""
+
     if phase == "field_sheeting":
         card_text = (
             f"*Phase 1/4: Field Sheeting - In Progress*\n"
@@ -509,6 +534,7 @@ def handle_start(ack, body, client):
             f"*Task:* {task['task_description']}"
             f"*Field Design:* {task['field_design']}\n"
             f"*Difficulty:*{task['difficulty']}\n"
+            f"{field_jig_line}"
             f"*Due:* {task['due_date']}\n"
             f"*Created by:* <@{task['user_id']}>\n"
             f"*Status:* In Progress"
@@ -523,6 +549,7 @@ def handle_start(ack, body, client):
             f"*Task:* {task['task_description']}\n"
             f"*Border Design:* {task['border_design']}\n"
             f"*Border Difficulty:* {task['border_difficulty']}\n"
+            f"{border_jig_line}"
             f"*Created by:* <@{task['user_id']}>\n"
             f"*Field Sheeting Time:* {field_time}\n"
             f"*Status:* In Progress"
@@ -546,6 +573,31 @@ def handle_start(ack, body, client):
     else:
         card_text = f"*Task T-{task_id} - In Progress*\n*Status:* In Progress"
         
+    buttons = [
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Stop"},
+            "style": "danger",
+            "action_id": "trk_stop_task",
+            "value": str(task_id)
+        },
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Complete Phase"},
+            "action_id": "trk_complete_task",
+            "value": str(task_id)
+        }
+    ]
+
+    # Only the sheeting phases use a jig, so only their cards offer the button
+    if phase in ("field_sheeting", "border_sheeting"):
+        buttons.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Add Jig"},
+            "action_id": "trk_add_jig",
+            "value": str(task_id)
+        })
+
     client.chat_update(
         channel=channel_id,
         ts=task["message_ts"],
@@ -558,21 +610,7 @@ def handle_start(ack, body, client):
             {
                 "type": "actions",
                 "block_id": f"task_actions_{task_id}",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Stop"},
-                        "style": "danger",
-                        "action_id": "trk_stop_task",
-                        "value": str(task_id)
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Complete Phase"},
-                        "action_id": "trk_complete_task",
-                        "value": str(task_id)
-                    }
-                ]
+                "elements": buttons
             }
         ]
     )
@@ -601,9 +639,13 @@ def handle_stop(ack, body, client):
     database.stop_task(task_id)
     updated_task = database.get_task(task_id)
     phase = updated_task["current_phase"]
-    
+
+    # Jig lines only appear once a jig has been recorded
+    field_jig_line = f"*Jig Size:* {updated_task['field_jigs']}\n" if updated_task["field_jigs"] else ""
+    border_jig_line = f"*Jig Size:* {updated_task['border_jigs']}\n" if updated_task["border_jigs"] else ""
+
     #This pause card is baased on the current phase
-    
+
     if phase == "field_sheeting":
         elapsed = database.format_elapsed(updated_task["field_elapsed"])
         card_text = (
@@ -614,12 +656,13 @@ def handle_stop(ack, body, client):
             f"*Task:* {task['task_description']}\n"
             f"*Field Design:* {task['field_design']}\n"
             f"*Difficulty:* {task['difficulty']}\n"
+            f"{field_jig_line}"
             f"*Due:* {task['due_date']}\n"
             f"*Created by:* <@{task['user_id']}>\n"
             f"*Status:* Paused\n"
-            f"*Field Time So Far:* {elapsed}"            
+            f"*Field Time So Far:* {elapsed}"
         )
-    
+
     elif phase == "border_sheeting":
         elapsed = database.format_elapsed(updated_task["border_elapsed"])
         card_text = (
@@ -630,6 +673,7 @@ def handle_stop(ack, body, client):
             f"*Task:* {task['task_description']}\n"
             f"*Border Design:* {task['border_design']}\n"
             f"*Border Difficulty:* {task['border_difficulty']}\n"
+            f"{border_jig_line}"
             f"*Created by:* <@{task['user_id']}>\n"
             f"*Status:* Paused\n"
             f"*Border Time So Far:* {elapsed}"
@@ -648,6 +692,37 @@ def handle_stop(ack, body, client):
             f"*Packing Time So Far:* {elapsed}"
         )
 
+    buttons = [
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Resume"},
+            "style": "primary",
+            "action_id": "trk_start_task",
+            "value": str(task_id)
+        },
+        {
+            "type":"button",
+            "text":{"type": "plain_text", "text": "Edit"},
+            "action_id": "trk_edit_task",
+            "value": str(task_id)
+        },
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Complete Phase"},
+            "action_id": "trk_complete_task",
+            "value": str(task_id)
+        }
+    ]
+
+    # Only the sheeting phases use a jig, so only their cards offer the button
+    if phase in ("field_sheeting", "border_sheeting"):
+        buttons.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Add Jig"},
+            "action_id": "trk_add_jig",
+            "value": str(task_id)
+        })
+
     client.chat_update(
         channel=channel_id,
         ts=task["message_ts"],
@@ -663,27 +738,7 @@ def handle_stop(ack, body, client):
             {
                 "type": "actions",
                 "block_id": f"task_actions_{task_id}",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Resume"},
-                        "style": "primary",
-                        "action_id": "trk_start_task",
-                        "value": str(task_id)
-                    },
-                    {
-                        "type":"button",
-                        "text":{"type": "plain_text", "text": "Edit"},
-                        "action_id": "trk_edit_task",
-                        "value": str(task_id)
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Complete Phase"},
-                        "action_id": "trk_complete_task",
-                        "value": str(task_id)
-                    }
-                ]
+                "elements": buttons
             }
         ]
     )
@@ -754,6 +809,19 @@ def handle_complete(ack, body, client):
                             "type": "plain_text_input",
                             "action_id": "border_difficulty",
                             "max_length": 2
+                        }
+                    },
+                    # Same box as the Field one: usually a millimetre size,
+                    # but "template" and split sizes are fine too. Optional.
+                    {
+                        "type": "input",
+                        "block_id": "border_jig_block",
+                        "optional": True,
+                        "label": {"type": "plain_text", "text": "Jig Size (mm)"},
+                        "element": {
+                            "type": "plain_text_input",
+                            "action_id": "border_jig",
+                            "placeholder": {"type": "plain_text", "text": "e.g. 49.6 or template"}
                         }
                     }
                 ]
@@ -863,11 +931,13 @@ def handle_border_submission(ack,body, client):
 # border details
     border_design = vals["border_design_block"]["border_design"]["value"]
     border_difficulty = vals["border_diff_block"]["border_difficulty"]["value"]
-    
+    border_jig = (vals["border_jig_block"]["border_jig"]["value"] or "").strip()
+
 # Transitioning to border phase in the database
-    database.move_to_border_phase(task_id, border_design, border_difficulty)
+    database.move_to_border_phase(task_id, border_design, border_difficulty, border_jig)
     task = database.get_task(task_id)
     field_time = database.format_elapsed(task["field_elapsed"])
+    border_jig_line = f"*Jig Size:* {border_jig}\n" if border_jig else ""
     
 # Updating the DM card
 
@@ -890,6 +960,7 @@ def handle_border_submission(ack,body, client):
                         f"*Task:* {task['task_description']}\n"
                         f"*Border Design:* {border_design}\n"
                         f"*Border Difficulty:* {border_difficulty}\n"
+                        f"{border_jig_line}"
                         f"*Created by:* <@{task['user_id']}>\n"
                         f"*Field Sheeting Time:* {field_time}\n"
                         f"*Status:* Created"
@@ -990,6 +1061,10 @@ def handle_notes_submission(ack,body,client):
     border_time = database.format_elapsed(elapsed["border_elapsed"])
     packing_time = database.format_elapsed(elapsed["packing_elapsed"])
     total_time = database.format_elapsed(elapsed["total_elapsed"])
+
+    # Jig lines for the summary, shown only when a jig was recorded
+    field_jig_line = f"*Field Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
+    border_jig_line = f"*Border Jig Size:* {task['border_jigs']}\n" if task["border_jigs"] else ""
     
 # Deleting packing card before posting final summary
     client.chat_update(
@@ -1025,6 +1100,8 @@ def handle_notes_submission(ack,body,client):
                         f"*Customer:* {task['customer_name']}\n"
                         f"*Invoice:* {task['invoice_number']}\n"
                         f"*Task:* {task['task_description']}\n"
+                        f"{field_jig_line}"
+                        f"{border_jig_line}"
                         f"*Completed by:* <@{user_id}>\n\n"
                         f"*Phase Breakdown:*\n"
                         f"🟦 Field Sheeting: {field_time}\n"
@@ -1041,6 +1118,192 @@ def handle_notes_submission(ack,body,client):
     
 
         
+# Add Jig button - a phase sometimes needs another jig part way through.
+# Maybe the first jig turned out wrong and was swapped, maybe two sizes are
+# genuinely needed together. Either way the earlier jig really was used, so
+# this ADDS a record next to it - it never overwrites one. Typing mistakes
+# are fixed through Edit instead, which changes the value it names.
+
+@app.action("trk_add_jig")
+def handle_add_jig(ack, body, client):
+    ack()
+    task_id = int(body["actions"][0]["value"])
+    user_id = body["user"]["id"]
+    task = database.get_task(task_id)
+    channel_id = body["container"]["channel_id"]
+
+    if task is None:
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text="Task not found. It may have been deleted."
+        )
+        return
+
+    if task["user_id"] != user_id:
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text="You can only control your own tasks."
+        )
+        return
+
+    # The button lives on the Field and Border cards, but a stale card could
+    # still be clicked after the job moved on - packing has no jig.
+    phase = task["current_phase"]
+    if phase not in ("field_sheeting", "border_sheeting"):
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text="Jigs belong to the Field or Border phase - this job has moved past those."
+        )
+        return
+
+    # Remember which phase the button was pressed from, so the new jig lands
+    # on the right one
+    metadata = json.dumps({"task_id": task_id, "channel_id": channel_id, "phase": phase})
+
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view={
+            "type": "modal",
+            "callback_id": "trk_add_jig_modal",
+            "title": {"type": "plain_text", "text": "Add Jig"},
+            "submit": {"type": "plain_text", "text": "Add"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "private_metadata": metadata,
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "jig_block",
+                    "label": {"type": "plain_text", "text": "Jig Size (mm)"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "jig_size",
+                        "placeholder": {"type": "plain_text", "text": "e.g. 49.6 or template"}
+                    }
+                }
+            ]
+        }
+    )
+
+@app.view("trk_add_jig_modal")
+def handle_add_jig_submission(ack, body, client):
+    ack()
+    vals = body["view"]["state"]["values"]
+    metadata = json.loads(body["view"]["private_metadata"])
+    task_id = metadata["task_id"]
+    channel_id = metadata["channel_id"]
+    phase = metadata["phase"]
+
+    jig_size = (vals["jig_block"]["jig_size"]["value"] or "").strip()
+    if not jig_size:
+        return
+
+    database.add_jig(task_id, phase, jig_size)
+    task = database.get_task(task_id)
+    if task is None:
+        return
+
+    # Refresh the card so the maker sees every jig recorded so far
+    field_jig_line = f"*Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
+    border_jig_line = f"*Jig Size:* {task['border_jigs']}\n" if task["border_jigs"] else ""
+    running = task["status"] == "in_progress"
+    status_text = "In Progress" if running else "Paused"
+
+    if phase == "field_sheeting":
+        card_text = (
+            f"*Phase 1/4: Field Sheeting — {status_text}*\n"
+            f"*ID:* T-{task_id}\n"
+            f"*Customer:* {task['customer_name']}\n"
+            f"*Invoice:* {task['invoice_number']}\n"
+            f"*Task:* {task['task_description']}\n"
+            f"*Field Design:* {task['field_design']}\n"
+            f"*Difficulty:* {task['difficulty']}\n"
+            f"{field_jig_line}"
+            f"*Due:* {task['due_date']}\n"
+            f"*Created by:* <@{task['user_id']}>\n"
+            f"*Status:* {status_text}"
+        )
+    else:
+        field_time = database.format_elapsed(task["field_elapsed"])
+        card_text = (
+            f"*Phase 2/4: Border Sheeting — {status_text}*\n"
+            f"*ID:* T-{task_id}\n"
+            f"*Customer:* {task['customer_name']}\n"
+            f"*Invoice:* {task['invoice_number']}\n"
+            f"*Task:* {task['task_description']}\n"
+            f"*Border Design:* {task['border_design']}\n"
+            f"*Border Difficulty:* {task['border_difficulty']}\n"
+            f"{border_jig_line}"
+            f"*Created by:* <@{task['user_id']}>\n"
+            f"*Field Sheeting Time:* {field_time}\n"
+            f"*Status:* {status_text}"
+        )
+
+    # Same buttons the card had before the modal opened
+    if running:
+        buttons = [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Stop"},
+                "style": "danger",
+                "action_id": "trk_stop_task",
+                "value": str(task_id)
+            },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Complete Phase"},
+                "action_id": "trk_complete_task",
+                "value": str(task_id)
+            }
+        ]
+    else:
+        buttons = [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Resume"},
+                "style": "primary",
+                "action_id": "trk_start_task",
+                "value": str(task_id)
+            },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Edit"},
+                "action_id": "trk_edit_task",
+                "value": str(task_id)
+            },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Complete Phase"},
+                "action_id": "trk_complete_task",
+                "value": str(task_id)
+            }
+        ]
+    buttons.append({
+        "type": "button",
+        "text": {"type": "plain_text", "text": "Add Jig"},
+        "action_id": "trk_add_jig",
+        "value": str(task_id)
+    })
+
+    client.chat_update(
+        channel=channel_id,
+        ts=task["message_ts"],
+        text=f"Task T-{task_id}: jig {jig_size} recorded.",
+        blocks=[
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": card_text}
+            },
+            {
+                "type": "actions",
+                "block_id": f"task_actions_{task_id}",
+                "elements": buttons
+            }
+        ]
+    )
+
 #Delete Button
 @app.action("trk_delete_task")
 def handle_delete(ack, body, client):
@@ -1117,6 +1380,33 @@ def handle_edit(ack, body, client):
         "channel_id": channel_id
     })
 
+    # One box per jig already recorded, pre-filled, so a mistyped value can
+    # be corrected later - even after that phase has finished. These boxes
+    # fix EXISTING jigs; a genuinely new jig goes through Add Jig instead.
+    jig_blocks = []
+    for i, rec in enumerate(task["field_jig_records"], start=1):
+        jig_blocks.append({
+            "type": "input",
+            "block_id": f"jig_edit_{rec['id']}",
+            "label": {"type": "plain_text", "text": f"Field Jig {i} (mm)"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "jig_value",
+                "initial_value": rec["value"]
+            }
+        })
+    for i, rec in enumerate(task["border_jig_records"], start=1):
+        jig_blocks.append({
+            "type": "input",
+            "block_id": f"jig_edit_{rec['id']}",
+            "label": {"type": "plain_text", "text": f"Border Jig {i} (mm)"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "jig_value",
+                "initial_value": rec["value"]
+            }
+        })
+
     # Open pre-filled edit modal
     client.views_open(
         trigger_id=body["trigger_id"],
@@ -1180,6 +1470,7 @@ def handle_edit(ack, body, client):
                         "initial_value": task["difficulty"] or ""
                     }
                 },
+                *jig_blocks,
                 {
                     "type": "input",
                     "block_id": "date_block",
@@ -1215,6 +1506,14 @@ def handle_edit_submission(ack, body, client):
     difficulty = vals["difficulty_block"]["difficulty"]["value"]
     due_date = vals["date_block"]["due_date"]["value"] or "N/A"
 
+    # What each jig said before the modal opened, so only boxes the maker
+    # actually changed get corrected
+    task_before = database.get_task(task_id)
+    previous_jigs = {}
+    if task_before is not None:
+        for rec in task_before["field_jig_records"] + task_before["border_jig_records"]:
+            previous_jigs[rec["id"]] = rec["value"]
+
     # Save to database
     database.update_task(
         task_id=task_id,
@@ -1225,6 +1524,16 @@ def handle_edit_submission(ack, body, client):
         difficulty=difficulty,
         due_date=due_date
     )
+
+    # Fix any jig boxes the maker changed. Each correction names its own
+    # record, so fixing one jig never touches the others.
+    for block_id, entry in vals.items():
+        if not block_id.startswith("jig_edit_"):
+            continue
+        jig_id = block_id[len("jig_edit_"):]
+        new_value = (entry["jig_value"]["value"] or "").strip()
+        if new_value and new_value != previous_jigs.get(jig_id):
+            database.correct_jig(task_id, jig_id, new_value)
 
     # Fetch updated task to refresh the card
     task = database.get_task(task_id)
@@ -1284,6 +1593,9 @@ def handle_edit_submission(ack, body, client):
         ]
         status_text = "🟠 Paused"
 
+    # Jig line refreshed from the database, so it shows any corrections
+    field_jig_line = f"*Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
+
     client.chat_update(
         channel=channel_id,
         ts=task["message_ts"],
@@ -1301,6 +1613,7 @@ def handle_edit_submission(ack, body, client):
                         f"*Task:* {task_description}\n"
                         f"*Field Design:* {design}\n"
                         f"*Difficulty:* {difficulty}\n"
+                        f"{field_jig_line}"
                         f"*Due:* {due_date}\n"
                         f"*Created by:* <@{task['user_id']}>\n"
                         f"*Status:* {status_text}"

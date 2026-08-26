@@ -375,6 +375,28 @@ def _phase_of(phases, name, field):
     return (row or {}).get(field)
 
 
+def _jigs_of(view, phase_name):
+    """
+    The jig records LMSA holds for one phase, in the order they were recorded.
+
+    A phase normally has one jig, sometimes two or three — a jig swapped
+    mid-run, or two deliberately used together. LMSA keeps each as its own
+    record so the earlier one survives; here they come back as small dicts the
+    card and the Edit modal both read.
+    """
+    jigs = view.get("jigs") or []
+    return [
+        {"id": j["id"], "value": j["jigSizeText"]}
+        for j in jigs
+        if j.get("phase") == phase_name
+    ]
+
+
+def _jig_display(records):
+    """One line of jig values for a card: '49.6', or '49.6 / 50' after a swap."""
+    return " / ".join(r["value"] for r in records)
+
+
 def _row(view, timing):
     """Build the dictionary app.py indexes into, from the API's job view."""
     job = view["job"]
@@ -383,6 +405,9 @@ def _row(view, timing):
     field = int(seconds.get("field_sheeting", 0) or 0)
     border = int(seconds.get("border_sheeting", 0) or 0)
     packing = int(seconds.get("packing", 0) or 0)
+
+    field_jig_records = _jigs_of(view, "field_sheeting")
+    border_jig_records = _jigs_of(view, "border_sheeting")
 
     return {
         "task_id": job["jobNumber"],
@@ -396,9 +421,13 @@ def _row(view, timing):
         "field_design": _phase_of(phases, "field_sheeting", "designName"),
         "difficulty": _phase_of(phases, "field_sheeting", "difficulty"),
         "field_elapsed": field,
+        "field_jigs": _jig_display(field_jig_records),
+        "field_jig_records": field_jig_records,
         "border_design": _phase_of(phases, "border_sheeting", "designName"),
         "border_difficulty": _phase_of(phases, "border_sheeting", "difficulty"),
         "border_elapsed": border,
+        "border_jigs": _jig_display(border_jig_records),
+        "border_jig_records": border_jig_records,
         "packing_elapsed": packing,
         "general_notes": job.get("generalNotes"),
         "issues_encountered": job.get("issuesEncountered"),
@@ -456,9 +485,9 @@ def setup_database():
     print("Tracker API ready.")
 
 
-def create_task(user_id, channel_id, customer_name, invoice_number, task_description, due_date, is_na, design, difficulty):
+def create_task(user_id, channel_id, customer_name, invoice_number, task_description, due_date, is_na, design, difficulty, jig_size=None):
     """Create a job and return its number — the T-number shown on the card."""
-    data = _call("POST", "/jobs", {
+    payload = {
         "ownerSlackUserId": user_id,
         "customerName": customer_name,
         "invoiceNumber": invoice_number,
@@ -474,7 +503,11 @@ def create_task(user_id, channel_id, customer_name, invoice_number, task_descrip
         "fieldDifficulty": difficulty,
         "announceChannelId": channel_id,
         "actor": f"slack:{user_id}",
-    }, operation="create_task")
+    }
+    # The jig box is optional, so it is only sent when something was typed.
+    if jig_size:
+        payload["fieldJigSizeText"] = jig_size
+    data = _call("POST", "/jobs", payload, operation="create_task")
     return data["job"]["jobNumber"]
 
 
@@ -586,7 +619,7 @@ def _advance_cursor(job_id, phase, actor, operation):
             raise
 
 
-def move_to_border_phase(task_id, border_design, border_difficulty):
+def move_to_border_phase(task_id, border_design, border_difficulty, border_jig=None):
     """
     Record what the border modal collected, and move the cursor onto border.
 
@@ -602,13 +635,19 @@ def move_to_border_phase(task_id, border_design, border_difficulty):
     view, row = resolved
     job_id = view["job"]["id"]
     actor = f"slack:{row['user_id']}"
+    details = {
+        "phase": "border_sheeting",
+        "designName": border_design,
+        "difficulty": border_difficulty,
+        "actor": actor,
+    }
+    # The border modal's jig box is optional; sent only when something was
+    # typed. LMSA records it as the border phase's first jig — re-submitting
+    # this modal corrects that first value, it never stacks up copies.
+    if border_jig:
+        details["jigSizeText"] = border_jig
     try:
-        _call("POST", f"/jobs/{job_id}/phases/details", {
-            "phase": "border_sheeting",
-            "designName": border_design,
-            "difficulty": border_difficulty,
-            "actor": actor,
-        }, operation="move_to_border_phase")
+        _call("POST", f"/jobs/{job_id}/phases/details", details, operation="move_to_border_phase")
     except TrackerRefused as refusal:
         if refusal.reason != "already_processed":
             raise
@@ -703,6 +742,52 @@ def delete_task(task_id):
             "actor": f"slack:{row['user_id']}",
             "reason": "deleted from the job card",
         }, operation="delete_task")
+    except TrackerRefused as refusal:
+        if refusal.reason not in ("job_not_open", "already_processed"):
+            raise
+
+
+def add_jig(task_id, phase, jig_size):
+    """
+    Record another jig on the Field or Border phase — the Add Jig button.
+
+    Always adds a new record. The jig already on the card genuinely happened,
+    so it stays; the card then shows both, oldest first. A redelivered
+    submission is absorbed rather than adding the same jig twice.
+    """
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return
+    view, row = resolved
+    try:
+        _call("POST", f"/jobs/{view['job']['id']}/jigs", {
+            "phase": phase,
+            "jigSizeText": jig_size,
+            "actor": f"slack:{row['user_id']}",
+        }, operation="add_jig")
+    except TrackerRefused as refusal:
+        if refusal.reason not in ("job_not_open", "already_processed"):
+            raise
+
+
+def correct_jig(task_id, jig_id, jig_size):
+    """
+    Fix ONE jig value that was mistyped — an Edit, not a new jig.
+
+    LMSA keeps the old value in the audit trail, changes only the record named
+    here, and quietly does nothing if the value has not actually changed. The
+    operation carries the record's id so one Save that fixes two jigs sends
+    two distinct requests, and neither swallows the other.
+    """
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return
+    view, row = resolved
+    try:
+        _call("POST", f"/jobs/{view['job']['id']}/jigs/{jig_id}", {
+            "jigSizeText": jig_size,
+            "actor": f"slack:{row['user_id']}",
+        }, operation=f"correct_jig_{jig_id}")
     except TrackerRefused as refusal:
         if refusal.reason not in ("job_not_open", "already_processed"):
             raise
