@@ -583,7 +583,7 @@ def setup_database():
     print("Tracker API ready.")
 
 
-def create_task(user_id, channel_id, customer_name, invoice_number, task_description, due_date, is_na, design, difficulty):
+def create_task(user_id, channel_id, customer_name, invoice_number, task_description, due_date, design, difficulty):
     """
     Create a job and return its number — the T-number shown on the card.
 
@@ -601,13 +601,18 @@ def create_task(user_id, channel_id, customer_name, invoice_number, task_descrip
         "customerName": customer_name,
         "invoiceNumber": invoice_number,
         "taskDescription": task_description,
-        # The typed text is the due date. The read-back date is a bonus, and
-        # the No Set Date flag records only whether the box was actually
-        # ticked - text nobody could read as a date is not the same thing as
-        # somebody saying there is no date.
+        # The typed text is the due date; the read-back date is a bonus for
+        # anything later that wants to sort by it. A blank box sends null,
+        # which is a date nobody has been given yet.
+        #
+        # No dueDateNotApplicable, for the same reason update_task has never
+        # sent one: there is no control to source it from. The intake form no
+        # longer offers "No Set Date?", because a job with no deadline is not a
+        # thing this workshop has - every job is done as soon as practicable.
+        # Omitting the key leaves LMSA to default it to false for a new job and
+        # leaves an existing row's own value alone.
         "dueDateText": due_date,
         "dueDate": _due_date_to_iso(due_date),
-        "dueDateNotApplicable": bool(is_na),
         "fieldDesignName": design,
         "fieldDifficulty": difficulty,
         "announceChannelId": channel_id,

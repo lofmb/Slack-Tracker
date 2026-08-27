@@ -586,10 +586,38 @@ def _fields(task):
         pairs.append(("Field jig", task["field_jigs"]))
     if task.get("border_jigs"):
         pairs.append(("Border jig", task["border_jigs"]))
-    pairs.append(("Due", task["due_date"] or "N/A"))
+    pairs.append(("Due", due_date_display(task)))
     # Slack renders at most ten fields in a section.
     return [{"type": "mrkdwn", "text": "*" + label + "*\n" + str(value)}
             for label, value in pairs[:10]]
+
+
+NO_DUE_DATE = "Not set"
+
+
+def due_date_supplied(task):
+    """
+    The due date the maker was given, or None when nobody has given them one.
+
+    Every job needs doing as soon as practicable, so there is no such thing as
+    a job with no deadline. There are only jobs where a specific calendar date
+    is known and jobs where it is not, and a blank box says the second one.
+
+    Rows entered through the old form stored the word "N/A" for that, either as
+    the typed text or as a ticked box. It is read as "none supplied" here, at
+    the moment it is shown, so an old record reads correctly without anything
+    being rewritten. Anything else the maker typed is theirs and comes back
+    untouched - "Friday" and "when the paint arrives" are real answers.
+    """
+    text = (task.get("due_date") or "").strip()
+    if not text or text.upper() == "N/A":
+        return None
+    return text
+
+
+def due_date_display(task):
+    """The due date as a person reads it, wherever one is shown."""
+    return due_date_supplied(task) or NO_DUE_DATE
 
 
 def _lane_lines(task, phase):
@@ -982,26 +1010,14 @@ def track_command(ack, body, client):
                     "type": "input",
                     "block_id": "date_block",
                     "optional": True,
-                    "label": {"type": "plain_text", "text": "Due Date (DD/MM/YY)"},
+                    "label": {"type": "plain_text", "text": "Due date (DD/MM/YY)"},
                     "element": {
-                        "type":"plain_text_input",
-                        "action_id": "due_date"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "is_na_block",
-                    "optional": True,
-                    "label": {"type": "plain_text", "text": "No Set Date?"},
-                    "element": {
-                        "type": "checkboxes",
-                        "action_id": "is_na",
-                        "options": [
-                            {
-                                "text": {"type": "plain_text", "text": "N/A"},
-                                "value": "is_na"
-                            }
-                        ]
+                        "type": "plain_text_input",
+                        "action_id": "due_date",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "e.g. 01/09/26 - leave blank if you have not been given one"
+                        }
                     }
                 }
             ]
@@ -1124,7 +1140,7 @@ def handle_export(body, client):
             task["customer_name"],
             task["invoice_number"],
             task["task_description"],
-            task["due_date"] or "N/A",
+            due_date_display(task),
             task["field_design"] or "-",
             task["difficulty"],
             # Several jigs show as one readable cell, e.g. "49.6 / 50"
@@ -1212,14 +1228,10 @@ def handle_step_1(ack,body,client,):
     customer_name = vals["customer_block"]["customer_name"]["value"]
     invoice_number = vals["invoice_block"]["invoice_num"]["value"]
     task_description = vals["task_block"]["task_desc"]["value"]
-    due_date = vals["date_block"]["due_date"]["value"] or "N/A"
-    is_na_options = vals["is_na_block"]["is_na"].get("selected_options", [])
-    is_na = 1 if is_na_options else 0
-    
-    # If N/A is ticked, override the due date
-    if is_na:
-        due_date = "N/A"
-    
+    # An empty box is carried as nothing at all, not as the word "N/A". Nobody
+    # has given this maker a date yet; that is not a job with no deadline.
+    due_date = (vals["date_block"]["due_date"]["value"] or "").strip() or None
+
     #Bundling Step 1 data to pass forward
     step1_data = {
         "channel_id": channel_id,
@@ -1227,7 +1239,6 @@ def handle_step_1(ack,body,client,):
         "invoice_number": invoice_number,
         "task_description": task_description,
         "due_date": due_date,
-        "is_na": is_na
     }
 
     # Pushing the 2nd Step of the Modal
@@ -1278,7 +1289,6 @@ def handle_step_2(ack, body, client):
         invoice_number=prev_data["invoice_number"],
         task_description=prev_data["task_description"],
         due_date=prev_data["due_date"],
-        is_na=prev_data["is_na"],
         design=design,
         difficulty=difficulty
     )
@@ -2290,7 +2300,7 @@ def handle_edit(ack, body, client):
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "due_date",
-                        "initial_value": task["due_date"] if task["due_date"] != "N/A" else ""
+                        "initial_value": due_date_supplied(task) or ""
                     }
                 }
             ]
@@ -2315,7 +2325,9 @@ def handle_edit_submission(ack, body, client):
     task_description = vals["task_block"]["task_desc"]["value"]
     design = vals["design_block"]["design"]["value"]
     difficulty = vals["difficulty_block"]["difficulty"]["value"]
-    due_date = vals["date_block"]["due_date"]["value"] or "N/A"
+    # Same meaning as the intake box: cleared means nobody has given a date,
+    # which is carried as nothing rather than as the word "N/A".
+    due_date = (vals["date_block"]["due_date"]["value"] or "").strip() or None
 
     # What each jig said before the modal opened, so only boxes the maker
     # actually changed get corrected
