@@ -97,11 +97,18 @@ def border_modal_view(task, metadata, summary_text, offer_no_border=True):
     border absent is a decision about the job's shape, and the moment for it is
     the border's own turn - not while the field is still being worked.
     """
-    blocks = [{
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": summary_text},
-    }]
-    blocks.extend([
+    view = {
+        "type": "modal",
+        "callback_id": "trk_border_modal",
+        "title": {"type": "plain_text", "text": "Border details"},
+        "submit": {"type": "plain_text", "text": "Save the border details"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "private_metadata": metadata,
+        "blocks": [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": summary_text},
+            },
                 {
                     "type": "input",
                     "block_id": "border_design_block",
@@ -160,18 +167,12 @@ def border_modal_view(task, metadata, summary_text, offer_no_border=True):
                         }
                     ]
                 }
-    ])
-    if not offer_no_border:
-        blocks = [b for b in blocks if b.get("block_id") != "no_border_block"]
-    return {
-        "type": "modal",
-        "callback_id": "trk_border_modal",
-        "title": {"type": "plain_text", "text": "Border details"},
-        "submit": {"type": "plain_text", "text": "Save the border details"},
-        "close": {"type": "plain_text", "text": "Cancel"},
-        "private_metadata": metadata,
-        "blocks": blocks,
+        ],
     }
+    if not offer_no_border:
+        view["blocks"] = [b for b in view["blocks"]
+                          if b.get("block_id") != "no_border_block"]
+    return view
 
 
 def notes_modal_view(metadata, summary_text):
