@@ -608,7 +608,8 @@ def setup_database():
 
 
 def create_task(user_id, channel_id, customer_name, invoice_number, task_description, due_date,
-                design, difficulty, border_design=None, border_difficulty=None):
+                design, difficulty, border_design=None, border_difficulty=None,
+                field_present=None):
     """
     Create a job and return its number — the T-number shown on the card.
 
@@ -646,7 +647,12 @@ def create_task(user_id, channel_id, customer_name, invoice_number, task_descrip
         # leaves an existing row's own value alone.
         "dueDateText": due_date,
         "dueDate": _due_date_to_iso(due_date),
-        "fieldPresent": bool((design or "").strip()),
+        # The SHAPE is stated, never inferred from whether a design was typed.
+        # A caller that does not say has a field, which is every job the
+        # tracker made before a border could stand on its own; the intake form
+        # says so explicitly because its own copy tells the maker that leaving
+        # a part blank means the diagram does not have it.
+        "fieldPresent": True if field_present is None else bool(field_present),
         "fieldDesignName": design,
         "fieldDifficulty": difficulty,
         "borderDesignName": border_design,

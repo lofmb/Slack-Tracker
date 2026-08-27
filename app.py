@@ -1573,6 +1573,10 @@ def handle_step_2(ack, body, client):
         difficulty=difficulty,
         border_design=border_design or None,
         border_difficulty=border_difficulty,
+        # The form's own words: leaving a part blank means the diagram does not
+        # have it. So a blank field here is a border-only job, said explicitly
+        # rather than left for the adapter to guess from an empty box.
+        field_present=bool(design),
     )
 
     # Submitting this form is the handover into the workshop: the maker has the
