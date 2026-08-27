@@ -17,6 +17,17 @@ indexed into (task["customer_name"], task["field_elapsed"] and so on), so
 callers did not have to change. The per-phase elapsed values are summed from
 LMSA's timing ledger on read rather than stored, because a stored total drifts
 from the segments it claims to summarise.
+
+The file has three layers, in this order:
+
+    request identity and thread glue     making one Slack delivery recognisable
+    HTTP                                 reaching LMSA, and failing usefully
+    shape translation                    LMSA's JSON back into app.py's rows
+    the interface app.py uses            one function per workshop action
+
+If you are looking for a workshop operation - start_work, complete_task,
+add_jig - it is in the last of those, and the sections above it exist to make
+that one safe to call.
 """
 
 import contextvars
@@ -37,6 +48,8 @@ API_BASE_URL = os.environ.get("TRACKER_API_BASE_URL", "http://127.0.0.1:5000/int
 API_TOKEN = os.environ.get("TRACKER_INTERNAL_TOKEN", "")
 API_TIMEOUT_SECONDS = float(os.environ.get("TRACKER_API_TIMEOUT_SECONDS", "10"))
 
+# The job's three phases, in order. Nothing here reads this: it records the
+# vocabulary the rest of the file and app.py both use, in one obvious place.
 PHASES = ("field_sheeting", "border_sheeting", "packing")
 
 
@@ -59,13 +72,20 @@ class TrackerRefused(RuntimeError):
         self.detail = detail
 
 
-# --- request identity ------------------------------------------------------
+# --- request identity, and the thread glue that carries it -----------------
 # One Slack delivery can drive several writes (creating a job also stores its
 # card), so the key is the delivery plus the operation. A redelivery of the
 # same click repeats action_ts and therefore repeats the key, which LMSA
 # absorbs; a genuine later click carries a new action_ts and is treated as the
 # new action it is. A context variable rather than a global, so two overlapping
 # requests cannot read each other's identity.
+#
+# The threading machinery below is here for one reason: Bolt runs a handler on
+# a worker thread, and it does so AFTER the middleware that recorded the
+# identity has already returned. A context variable does not cross that
+# boundary by itself, so the executor copies it over. Without that, the handler
+# builds its key from nothing, the key is omitted, and a redelivered click
+# writes twice.
 
 _KEY_VERSION = "trk1"
 _current_identity = contextvars.ContextVar("tracker_request_identity", default=None)
@@ -274,13 +294,15 @@ def _due_date_to_text(job):
     """
     Give app.py back the due date exactly as the person typed it.
 
-    The due date box accepts anything, and always has - "01/09/26", "Friday",
-    "ASAP", "next week", "01/09/26 (if paint arrives)". Whatever was typed is
-    what shows on the card, what the Edit form is filled in with, and what goes
-    in the Due Date column of the spreadsheet, so it has to come back word for
-    word. LMSA stores that text as dueDateText.
+    The stored text can be anything: the form refuses "Friday" and "ASAP" now,
+    but rows saved before it did still hold exactly that, and one of them may be
+    what a card is about to show. Whatever is stored is what shows on the card,
+    what the Edit form is filled in with, and what goes in the Due Date column
+    of the spreadsheet, so it has to come back word for word. Validation belongs
+    to the form; this returns the record faithfully. LMSA stores that text as
+    dueDateText.
 
-    The date form is only used for a row saved before the text was kept.
+    The date form is the fallback for a row whose text was never kept.
     """
     text = job.get("dueDateText")
     if text is not None:
@@ -570,7 +592,7 @@ def _row_for(task_id):
 
 def setup_database():
     """
-    Confirm the tracker can reach LMSA. It no longer creates anything.
+    Confirm the tracker can reach LMSA. It creates nothing.
 
     Schema is applied by hand on the LMSA side and this process has no way to
     change it — no driver, no credentials, no privileges. Removing the ability
@@ -605,10 +627,9 @@ def create_task(user_id, channel_id, customer_name, invoice_number, task_descrip
         # anything later that wants to sort by it. A blank box sends null,
         # which is a date nobody has been given yet.
         #
-        # No dueDateNotApplicable, for the same reason update_task has never
-        # sent one: there is no control to source it from. The intake form no
-        # longer offers "No Set Date?", because a job with no deadline is not a
-        # thing this workshop has - every job is done as soon as practicable.
+        # No dueDateNotApplicable: there is no control to source one from. A job
+        # with no deadline is not a thing this workshop has - every job is done
+        # as soon as practicable - so the intake form asks for a date or nothing.
         # Omitting the key leaves LMSA to default it to false for a new job and
         # leaves an existing row's own value alone.
         "dueDateText": due_date,
@@ -721,6 +742,11 @@ def stop_work(task_id):
     if row["current_phase"] == "completed":
         return
     try:
+        # stopReason says a person chose to stop, as opposed to the segment
+        # being closed by something else - the way a cutting record is closed
+        # as "parent_stopped" when the work it sat inside ended. The ledger
+        # keeps the two apart so a report can tell deliberate pauses from
+        # consequences.
         _call("POST", f"/jobs/{view['job']['id']}/segments/stop", {
             "actor": f"slack:{row['user_id']}",
             "stopReason": "worker_action",
@@ -1113,10 +1139,10 @@ def update_task(task_id, customer, invoice, task_desc, design, difficulty, due_d
             "designName": design,
             "difficulty": difficulty,
             # No dueDateNotApplicable here on purpose. The Edit form has no
-            # No Set Date tick box, so there is nothing to send, and the old
-            # version never wrote that column on an edit either. Leaving the
-            # key out tells LMSA to keep whatever was chosen when the job was
-            # started, rather than quietly clearing it.
+            # No Set Date tick box, so there is nothing to send. Omitting the
+            # key tells LMSA to keep whatever the row already carries; sending
+            # it as null would clear it, silently erasing a historical choice
+            # the maker never touched.
             "dueDateText": due_date,
             "dueDate": _due_date_to_iso(due_date),
             "actor": f"slack:{row['user_id']}",
@@ -1127,9 +1153,11 @@ def update_task(task_id, customer, invoice, task_desc, design, difficulty, due_d
 
 
 def format_elapsed(seconds):
-    # Format elapsed seconds into a readable hours/minutes/seconds string.
-    # Every unit always appears. The xlsx export uses this, where a column of
-    # the same shape is easier to scan down than one that changes width.
+    """
+    Elapsed seconds as hours, minutes and seconds, with every unit always
+    shown. The xlsx export uses this: a column of the same shape is easier to
+    scan down than one that changes width row to row.
+    """
     if seconds is None:
         seconds = 0
     hours = seconds // 3600

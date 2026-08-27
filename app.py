@@ -1,7 +1,32 @@
+"""
+The Slack side of the workshop tracker: what a maker sees, and what happens
+when they press it.
+
+This file owns the conversation with the maker. It builds the working card and
+the forms, decides which buttons a job should be offering, reads what comes
+back, and says no in words when a job cannot do what was asked. It holds no
+data of its own: every durable operation goes to database.py, which is the
+other half of the tracker and talks to LMSA.
+
+A handler here reads the same way throughout:
+
+    the maker presses something
+        -> work out which job, and whether it is theirs to touch
+            -> check what the job actually allows
+                -> ask database.py to record it
+                    -> rebuild the card so it shows the new truth
+
+The job runs Field -> Border -> Packing. Field and Border each carry setup and
+sheeting underneath them, cutting is measured inside sheeting, and exactly one
+piece of work accrues at a time. Those rules belong to the job, not to this
+file; the sections below say where each part of the conversation lives.
+"""
+
 import os
 import json
 import datetime
 import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment
 from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -27,6 +52,12 @@ app = App(
     listener_executor=database.listener_executor()
 )
 
+# ---------------------------------------------------------------------------
+# Forms and wording shared by more than one route
+# ---------------------------------------------------------------------------
+# Defined once here because two different paths reach each of them, and a
+# change to one must not miss the other.
+
 def packing_modal_view(metadata, summary_text):
     """
     The Packing form.
@@ -47,6 +78,55 @@ def packing_modal_view(metadata, summary_text):
             {
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": summary_text}
+            }
+        ]
+    }
+
+
+def notes_modal_view(metadata, summary_text):
+    """
+    The last form: what happened, before the job closes.
+
+    Built here rather than inline so it reads beside the packing form it
+    follows, and so the two forms that end a job are changed in one place.
+    """
+    return {
+        "type": "modal",
+        "callback_id": "trk_notes_modal",
+        "title": {"type": "plain_text", "text": "Finish the job"},
+        "submit": {"type": "plain_text", "text": "Finish the job"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "private_metadata": metadata,
+        "blocks": [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": summary_text}
+            },
+            {
+                "type": "input",
+                "block_id": "notes_block",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Notes"},
+                "element": {
+                    "type": "plain_text_input",
+                    "multiline": True,
+                    "action_id": "general_notes",
+                    "placeholder": {"type": "plain_text",
+                                    "text": "Anything the next person should know"}
+                }
+            },
+            {
+                "type": "input",
+                "block_id": "issues_block",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Anything go wrong?"},
+                "element": {
+                    "type": "plain_text_input",
+                    "multiline": True,
+                    "action_id": "issues",
+                    "placeholder": {"type": "plain_text",
+                                    "text": "Breakages, wrong material, missing pieces"}
+                }
             }
         ]
     }
@@ -593,6 +673,12 @@ def _fields(task):
             for label, value in pairs[:10]]
 
 
+# ---------------------------------------------------------------------------
+# The due date
+# ---------------------------------------------------------------------------
+# One field, meaning DD/MM/YY. Blank means nobody supplied a date - not that
+# the job has no deadline, which is not a state this workshop has.
+
 NO_DUE_DATE = "Not set"
 
 
@@ -610,12 +696,11 @@ def read_due_date(typed):
     has been supplied: a blank box, or the "N/A" the old form used to write,
     which is read as the same thing so retyping it cannot mint another one.
 
-    The box says DD/MM/YY, so it now means it. It accepted anything for years,
-    which made the label a suggestion rather than a promise - "Friday" was
-    stored and shown as a due date that nothing could sort by or chase. A real
-    date is stored the way the label reads, whatever separator was typed and
-    whether the year was given as two digits or four, so every card says it the
-    same way.
+    The box says DD/MM/YY and means it. A label that accepts "Friday" is a
+    suggestion rather than a promise, and stores a due date nothing can sort by
+    or chase. A real date is stored the way the label reads, whatever separator
+    was typed and whether the year was given as two digits or four, so every
+    card says it the same way.
 
     The date has to exist: 31/02/26 is refused here rather than accepted and
     then rejected by the database, where the maker would see nothing useful.
@@ -702,9 +787,11 @@ def _lane_lines(task, phase):
         lane = "field" if phase == "field_sheeting" else "border"
         cutting = task.get(lane + "_cutting_elapsed") or 0
         if cutting:
-            # An en dash rather than a hollow bullet: both read as a level
-            # below, and this one survives a Windows console, where the proof
-            # harnesses print card text back when a check fails.
+            # Cutting is written under the sheeting it happened inside, never
+            # as a line of its own, because it is time already counted. An en
+            # dash rather than a hollow bullet: both read as a level below, and
+            # this one still prints where the card text is rendered outside
+            # Slack.
             lines.append("     –  of which cutting  " + database.format_duration(cutting))
     return lines
 
@@ -972,6 +1059,13 @@ def refusal_text(reason, task, phase=None):
     return texts.get(reason, "That could not be done, so nothing has been changed.")
 
 
+# ---------------------------------------------------------------------------
+# Commands, and the handlers behind every button
+# ---------------------------------------------------------------------------
+# From here down, every function is registered with Slack. The middleware
+# runs first on each delivery and notes which delivery it is, so a click that
+# arrives twice is recognised as the same action.
+
 @app.middleware
 def track_slack_delivery(body, next):
     # Note which Slack delivery is being handled, so a redelivery of the same
@@ -981,31 +1075,30 @@ def track_slack_delivery(body, next):
     with database.slack_request(body):
         return next()
 
-# /hello command test in slack
+# A liveness check: it answers, so the bot is connected and its commands are
+# registered. Nothing in the workflow uses it.
 
 @app.command ("/hello")
 def hello_command(ack, body, say):
-    
+
     ack()
     user_id = body["user_id"]
     say(f"Hi there, <@{user_id}>! I'm ready to track your projects.")
 
-# /track command to start the project tracking process. Loading the form.    
+# /track opens the intake form. /track export sends the spreadsheet instead.
 
 @app.command("/track")
 def track_command(ack, body, client):
-    # Acknowledging the command
     ack()
     user_id = body ["user_id"]
-    
-    # Subcommand: /track export
+
     subcommand = body.get ("text", "").strip().lower()
     if subcommand == "export":
         handle_export(body,client)
         return
-    
-    
-    # Checking if the task is already running
+
+    # One job at a time per person. A maker with something already open is told
+    # what it is, rather than quietly given a second job to lose track of.
     active_task = database.get_active_task(user_id)
     if active_task:
         client.chat_postEphemeral(
@@ -1015,7 +1108,8 @@ def track_command(ack, body, client):
             
         )
         return
-    # opening the Modal - When you click on start this is the dictionaries and lists which creates the look of the form
+    # The first of the two intake forms. private_metadata carries the channel
+    # the command came from, so the job can be announced back to the same room.
     client.views_open(
         trigger_id=body["trigger_id"],
         view={
@@ -1068,6 +1162,10 @@ def track_command(ack, body, client):
             ]
         }
     )
+
+# ---------------------------------------------------------------------------
+# The spreadsheet export
+# ---------------------------------------------------------------------------
 
 def resolve_existing_dm(client, user_id):
     # Find the bot's existing DM conversation with a user, paging through the
@@ -1163,8 +1261,7 @@ def handle_export(body, client):
     ws.append(headers)
     
     # Styling the headers
-    
-    from openpyxl.styles import Font, PatternFill, Alignment
+
     header_font = Font(bold=True, color="FFFFFF")
     header_fill = PatternFill("solid", fgColor ="2C3E50")
     
@@ -1260,16 +1357,19 @@ def handle_export(body, client):
             user=user_id,
             text=f"Export ready! Check your DMs - {len(tasks)} completed job(s) exported to Excel."
         )
-        
-#Step 1 Submission - This stage collects data and pushes to the Step 2 Modal
+
+# ---------------------------------------------------------------------------
+# Job intake
+# ---------------------------------------------------------------------------
+# Two forms, then the job exists. Submitting the second one is the handover
+# into workshop work: it creates the job and starts its setup in the same
+# transaction, which is why the card that follows has no Start button.
+
 @app.view("trk_track_step_1")
 def handle_step_1(ack,body,client,):
     vals = body["view"]["state"]["values"]
     channel_id = body["view"]["private_metadata"]
-    
-    # Extract the user and channel
-    
-    # Pulling the values out of the submitted form
+
     customer_name = vals["customer_block"]["customer_name"]["value"]
     invoice_number = vals["invoice_block"]["invoice_num"]["value"]
     task_description = vals["task_block"]["task_desc"]["value"]
@@ -1282,7 +1382,8 @@ def handle_step_1(ack,body,client,):
         ack(response_action="errors", errors={"date_block": due_date_error})
         return
 
-    #Bundling Step 1 data to pass forward
+    # private_metadata is the only way to carry these across to the pushed
+    # form, which arrives as a separate submission.
     step1_data = {
         "channel_id": channel_id,
         "customer_name": customer_name,
@@ -1291,8 +1392,6 @@ def handle_step_1(ack,body,client,):
         "due_date": due_date,
     }
 
-    # Pushing the 2nd Step of the Modal
-    
     ack(response_action="push", view={
         "type": "modal",
         "callback_id": "trk_track_step_2",
@@ -1323,11 +1422,9 @@ def handle_step_2(ack, body, client):
     user_id = body["user"]["id"]
     vals = body["view"]["state"]["values"]
     
-    # Fetching the Step 1 data from the metadata
     prev_data = json.loads(body["view"]["private_metadata"])
     team_channel_id = prev_data["channel_id"]
     
-    # Collecting Step 2 values
     design = vals["design"]["val"]["value"]
     difficulty = vals["diff"]["difficulty"]["value"]
 
@@ -1364,6 +1461,14 @@ def handle_step_2(ack, body, client):
         text=(f"T-{task_id} is yours and the setup clock is running. The card is in your DMs "
               f"with the bot.")
     )
+
+# ---------------------------------------------------------------------------
+# Working the job: starting, pausing, cutting, switching
+# ---------------------------------------------------------------------------
+# Exactly one piece of work accrues at a time. Pause means "not working this
+# job for now"; Switch work means "still on this job, on something else".
+# Neither finishes anything. Cutting is measured inside sheeting and leaves
+# the sheeting timer running.
 
 @app.action("trk_start_setup")
 @app.action("trk_start_production")
@@ -1620,6 +1725,13 @@ def handle_start_packing(ack, body, client):
     update_card(client, database.get_task(task_id), channel_id)
 
 
+# ---------------------------------------------------------------------------
+# Finishing a lane, and the decisions that follow it
+# ---------------------------------------------------------------------------
+# Finishing does not move the job on by itself. The form that follows commits
+# the move - which is what lets a cancelled form be reopened by pressing the
+# same button again.
+
 @app.action("trk_complete_task")
 def handle_complete(ack, body, client):
     """
@@ -1781,51 +1893,12 @@ def handle_complete(ack, body, client):
     elif phase == "packing":
         client.views_open(
             trigger_id=body["trigger_id"],
-            view={
-                "type": "modal",
-                "callback_id": "trk_notes_modal",
-                "title": {"type": "plain_text", "text": "Finish the job"},
-                "submit": {"type": "plain_text", "text": "Finish the job"},
-                "close": {"type": "plain_text", "text": "Cancel"},
-                "private_metadata": metadata,
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": (f"*Packing finished.* "
-                                     f"{lane_report(updated_task, 'packing')}\n"
-                                     f"Anything worth recording before this job closes?")
-                        }
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "notes_block",
-                        "optional": True,
-                        "label": {"type": "plain_text", "text": "Notes"},
-                        "element": {
-                            "type": "plain_text_input",
-                            "multiline": True,
-                            "action_id": "general_notes",
-                            "placeholder": {"type": "plain_text",
-                                            "text": "Anything the next person should know"}
-                        }
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "issues_block",
-                        "optional": True,
-                        "label": {"type": "plain_text", "text": "Anything go wrong?"},
-                        "element": {
-                            "type": "plain_text_input",
-                            "multiline": True,
-                            "action_id": "issues",
-                            "placeholder": {"type": "plain_text",
-                                            "text": "Breakages, wrong material, missing pieces"}
-                        }
-                    }
-                ]
-            }
+            view=notes_modal_view(
+                metadata,
+                (f"*Packing finished.* "
+                 f"{lane_report(updated_task, 'packing')}\n"
+                 f"Anything worth recording before this job closes?")
+            )
         )
 
 
@@ -1882,6 +1955,9 @@ def handle_no_border(ack, body, client):
     team_channel_id = metadata["team_channel_id"]
     user_id = body["user"]["id"]
 
+    # The same three guards resolve_job() applies, checked by hand because this
+    # arrives from a modal: a form submission carries no container.channel_id,
+    # so the channel has to come from private_metadata instead.
     task = database.get_task(task_id)
 
     if task is None:
@@ -2058,6 +2134,13 @@ def handle_notes_submission(ack, body, client):
 # the setup, which is after the job was logged and can be well after the
 # sheeting started.
 
+# ---------------------------------------------------------------------------
+# Jig and template
+# ---------------------------------------------------------------------------
+# A phase records any number of jigs, in the order they were used. Adding
+# appends, because a jig that was genuinely used stays on the record; a
+# typing mistake is corrected through Edit instead.
+
 @app.action("trk_add_jig")
 def handle_add_jig(ack, body, client):
     ack()
@@ -2172,6 +2255,12 @@ def handle_add_jig_submission(ack, body, client):
 
 
 #Delete Button
+# ---------------------------------------------------------------------------
+# Corrections: editing a job, and cancelling one
+# ---------------------------------------------------------------------------
+# Editing changes the values a job was given. Cancelling keeps the job and
+# everything recorded on it - nothing is ever deleted outright.
+
 @app.action("trk_delete_task")
 def handle_delete(ack, body, client):
     ack()
@@ -2188,7 +2277,10 @@ def handle_delete(ack, body, client):
         )
         return
 
-    # Only the creator can delete
+    # A job is only ever taken off the list by the maker whose job it is. There
+    # is no supervisor path anywhere in the tracker yet, so this check is the
+    # whole of the rule - it is not a friendly message in front of a second one
+    # enforced further down.
     if task["user_id"] != user_id:
         client.chat_postEphemeral(
             channel=channel_id,
@@ -2346,10 +2438,10 @@ def handle_edit(ack, body, client):
                     "type": "input",
                     "block_id": "date_block",
                     "optional": True,
-                    # The same field as the intake form, so the same words,
-                    # the same format and the same rules. Two contracts for one
-                    # box is how "DD/MM/YYYY" here and "DD/MM/YY" there both
-                    # ended up describing the same column.
+                    # The same field as the intake form, so the same words, the
+                    # same format and the same rules. Both build the box from
+                    # DUE_DATE_LABEL and DUE_DATE_HINT so one box cannot end up
+                    # promising two different things.
                     "label": {"type": "plain_text", "text": DUE_DATE_LABEL},
                     "element": {
                         "type": "plain_text_input",
@@ -2436,6 +2528,12 @@ def handle_edit_submission(ack, body, client):
     if task is not None and task["current_phase"] != "completed":
         update_card(client, task, channel_id, note="*Details updated.*")
 
+
+# ---------------------------------------------------------------------------
+# Running the tracker on its own
+# ---------------------------------------------------------------------------
+# Inside LMSA the relay delivers events instead, so nothing below runs there.
+# This is the path for running the tracker standalone against Slack.
 
 if __name__ == "__main__":
     database.setup_database()
