@@ -500,9 +500,11 @@ def _row(view, timing):
         "border_jig_records": border_jig_records,
         # A skipped border and a border worked for no measurable time both sum
         # to zero seconds, so nothing else in this dict can tell them apart.
-        # The lane state is carried explicitly, and every border rendering
-        # keys off it.
+        # The lane state is carried explicitly, and every rendering of an
+        # absent lane keys off it. Either production lane can be absent: the
+        # diagram may have a field, a border, or both. Packing never is.
         "border_skipped": _phase_of(phases, "border_sheeting", "state") == "skipped",
+        "field_skipped": _phase_of(phases, "field_sheeting", "state") == "skipped",
         # Where each lane stands: not_started, running, paused, complete, or
         # skipped. The card reads these to decide what the maker can still do -
         # a finished lane is not somewhere to switch to, and a lane declared
@@ -605,7 +607,8 @@ def setup_database():
     print("Tracker API ready.")
 
 
-def create_task(user_id, channel_id, customer_name, invoice_number, task_description, due_date, design, difficulty):
+def create_task(user_id, channel_id, customer_name, invoice_number, task_description, due_date,
+                design, difficulty, border_design=None, border_difficulty=None):
     """
     Create a job and return its number — the T-number shown on the card.
 
@@ -613,6 +616,15 @@ def create_task(user_id, channel_id, customer_name, invoice_number, task_descrip
     intake form is the maker taking the job on, and the setup — fetching the
     material, reading the drawings, finding the jig — is the first real work.
     There is nothing left for a "Start" button to start.
+
+    The diagram decides the shape. A job may have a field, a border, or both,
+    and at least one of them. A blank field design means the diagram has no
+    field: the job says so, and LMSA records the field lane as one that did not
+    happen rather than starting a lane nobody drew.
+
+    A border given here is what the diagram SAYS, not work that has started.
+    The border form still asks when its turn comes, prefilled with this, so a
+    value known at intake and a value discovered later end up in the same place.
 
     No jig is sent. A maker filling this form in normally does not know the jig
     yet; finding and testing it IS the setup, so the card asks for it at the
@@ -634,8 +646,11 @@ def create_task(user_id, channel_id, customer_name, invoice_number, task_descrip
         # leaves an existing row's own value alone.
         "dueDateText": due_date,
         "dueDate": _due_date_to_iso(due_date),
+        "fieldPresent": bool((design or "").strip()),
         "fieldDesignName": design,
         "fieldDifficulty": difficulty,
+        "borderDesignName": border_design,
+        "borderDifficulty": border_difficulty,
         "announceChannelId": channel_id,
         "actor": f"slack:{user_id}",
     }

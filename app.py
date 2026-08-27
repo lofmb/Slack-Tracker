@@ -753,6 +753,38 @@ def due_date_display(task):
     return due_date_supplied(task) or NO_DUE_DATE
 
 
+# ---------------------------------------------------------------------------
+# Difficulty
+# ---------------------------------------------------------------------------
+# A number from 1 to 10, and nothing else. That is what it has always been -
+# every difficulty ever recorded is a whole number in that range - but the box
+# never said so, so a maker who answered it in words was told only that they
+# had used too many characters. The label carries the range now, and a value
+# that is not one is refused in those words.
+
+DIFFICULTY_LABEL_FIELD = "Field difficulty (1-10)"
+DIFFICULTY_LABEL_BORDER = "Border difficulty (1-10)"
+DIFFICULTY_HINT = "e.g. 3"
+DIFFICULTY_ERROR = "Give the difficulty as a whole number from 1 to 10, for example 3."
+
+
+def read_difficulty(typed):
+    """
+    Returns (text to store, error to show them). None with no error means the
+    box was left blank, which is allowed: not every job has both lanes, and a
+    lane the diagram does not have has no difficulty either.
+    """
+    raw = (typed or "").strip()
+    if not raw:
+        return None, None
+    if not all(character in "0123456789" for character in raw):
+        return None, DIFFICULTY_ERROR
+    value = int(raw)
+    if value < 1 or value > 10:
+        return None, DIFFICULTY_ERROR
+    return str(value), None
+
+
 def _lane_lines(task, phase):
     """
     One lane's time, with its parts underneath in the shape they really have.
@@ -832,6 +864,8 @@ def lane_report(task, phase):
     """
     if phase == "border_sheeting" and task.get("border_skipped"):
         return "*Border*  no border on this job"
+    if phase == "field_sheeting" and task.get("field_skipped"):
+        return "*Field*  no field on this job"
     return "\n".join(_lane_lines(task, phase))
 
 
@@ -1132,7 +1166,7 @@ def track_command(ack, body, client):
                 {
                     "type": "input",
                     "block_id": "invoice_block",
-                    "label": {"type": "plain_text", "text": "Invoice number"},
+                    "label": {"type": "plain_text", "text": "Invoice / Pro Forma number"},
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "invoice_num"
@@ -1392,43 +1426,142 @@ def handle_step_1(ack,body,client,):
         "due_date": due_date,
     }
 
+    # The second form asks what the diagram has on it. A job may be a field, a
+    # border, or both, so every box here is optional and the submission checks
+    # that at least one of them was answered. Asking for a field on a
+    # border-only job is how a lane nobody drew ends up on the record.
+    #
+    # No jig question here. A maker filling this in has just been handed the job
+    # and normally does not know the jig yet - finding and testing it is the
+    # setup. The card asks at the point it can actually be answered.
     ack(response_action="push", view={
         "type": "modal",
         "callback_id": "trk_track_step_2",
-        "title": {"type": "plain_text", "text": "Field design - 2 of 2"},
+        "title": {"type": "plain_text", "text": "New job - 2 of 2"},
         "submit": {"type": "plain_text", "text": "Create the job"},
         "close": {"type": "plain_text", "text": "Back"},
         "private_metadata": json.dumps(step1_data),
         "blocks": [
-            {"type": "input", "block_id": "design", "label":
-                {"type": "plain_text", "text": "Field Design Name"},
-                "element":{"type": "plain_text_input", "action_id": "val"}
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn",
+                         "text": "*What is on the diagram?*\nFill in the field, the border, or "
+                                 "both. Leave a part blank if the diagram does not have it."}
+            },
+            {
+                "type": "input",
+                "block_id": "design",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Field design"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "val",
+                    "placeholder": {"type": "plain_text", "text": "e.g. Tivoli"},
                 },
-            {"type": "input", "block_id": "diff", "label":
-                {"type": "plain_text", "text": "Field difficulty"},
-                "element":{"type": "plain_text_input", "action_id": "difficulty", "max_length": 2}
-                }
-            # No jig question here. A maker filling this in has just been handed
-            # the job and normally does not know the jig yet - finding and
-            # testing it is the setup. The card asks at the point it can
-            # actually be answered.
+            },
+            {
+                "type": "input",
+                "block_id": "diff",
+                "optional": True,
+                "label": {"type": "plain_text", "text": DIFFICULTY_LABEL_FIELD},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "difficulty",
+                    "max_length": 2,
+                    "placeholder": {"type": "plain_text", "text": DIFFICULTY_HINT},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "border_design",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Border design"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "val",
+                    "placeholder": {"type": "plain_text", "text": "e.g. Greek Key"},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "border_diff",
+                "optional": True,
+                "label": {"type": "plain_text", "text": DIFFICULTY_LABEL_BORDER},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "difficulty",
+                    "max_length": 2,
+                    "placeholder": {"type": "plain_text", "text": DIFFICULTY_HINT},
+                },
+            },
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn",
+                              "text": "Creating the job starts its setup - getting it ready to "
+                                      "work. The card goes to your DMs."}]
+            },
         ]
     }
     )
 
+def _typed(values, block_id, action_id):
+    """
+    What the maker typed into one box, or None if that box was not on the form
+    they submitted.
+
+    A modal a maker already had open when the form changed still submits the
+    blocks it was built with. Reading those defensively means an older form
+    lands as the job it describes - a field job with no border on it - rather
+    than raising on a block that was never there.
+    """
+    block = values.get(block_id) or {}
+    return (block.get(action_id) or {}).get("value")
+
+
 @app.view("trk_track_step_2")
 def handle_step_2(ack, body, client):
-    ack(response_action = "clear")
     user_id = body["user"]["id"]
     vals = body["view"]["state"]["values"]
-    
+
     prev_data = json.loads(body["view"]["private_metadata"])
     team_channel_id = prev_data["channel_id"]
-    
-    design = vals["design"]["val"]["value"]
-    difficulty = vals["diff"]["difficulty"]["value"]
 
-    # Saving the task to the database
+    design = (_typed(vals, "design", "val") or "").strip()
+    border_design = (_typed(vals, "border_design", "val") or "").strip()
+
+    # A job is what the diagram has on it, and a diagram with neither a field
+    # nor a border is not a job. Said against the first box, because that is
+    # where a maker's eye is when they have filled in nothing.
+    if not design and not border_design:
+        ack(response_action="errors", errors={
+            "design": "Fill in the field, the border, or both - a job needs at least one."
+        })
+        return
+
+    difficulty, difficulty_error = read_difficulty(_typed(vals, "diff", "difficulty"))
+    if difficulty_error:
+        ack(response_action="errors", errors={"diff": difficulty_error})
+        return
+    border_difficulty, border_difficulty_error = read_difficulty(
+        _typed(vals, "border_diff", "difficulty"))
+    if border_difficulty_error:
+        ack(response_action="errors", errors={"border_diff": border_difficulty_error})
+        return
+
+    # A difficulty for a lane the diagram does not have describes nothing.
+    if difficulty and not design:
+        ack(response_action="errors", errors={
+            "design": "Name the field design, or clear the field difficulty."
+        })
+        return
+    if border_difficulty and not border_design:
+        ack(response_action="errors", errors={
+            "border_design": "Name the border design, or clear the border difficulty."
+        })
+        return
+
+    ack(response_action="clear")
+
     task_id = database.create_task(
         user_id=user_id,
         channel_id=team_channel_id,
@@ -1436,8 +1569,10 @@ def handle_step_2(ack, body, client):
         invoice_number=prev_data["invoice_number"],
         task_description=prev_data["task_description"],
         due_date=prev_data["due_date"],
-        design=design,
-        difficulty=difficulty
+        design=design or None,
+        difficulty=difficulty,
+        border_design=border_design or None,
+        border_difficulty=border_difficulty,
     )
 
     # Submitting this form is the handover into the workshop: the maker has the
@@ -1811,20 +1946,27 @@ def handle_complete(ack, body, client):
                     {
                         "type": "input",
                         "block_id": "border_design_block",
-                        "label": {"type": "plain_text", "text": "Border design name"},
+                        "label": {"type": "plain_text", "text": "Border design"},
                         "element": {
                             "type": "plain_text_input",
-                            "action_id": "border_design"
+                            "action_id": "border_design",
+                            # Prefilled when the diagram already said what the
+                            # border is. Known at intake, worked now - and
+                            # still correctable here, which is the point of
+                            # asking again rather than assuming.
+                            "initial_value": updated_task.get("border_design") or ""
                         }
                     },
                     {
                         "type": "input",
                         "block_id": "border_diff_block",
-                        "label": {"type": "plain_text", "text": "Border difficulty"},
+                        "label": {"type": "plain_text", "text": DIFFICULTY_LABEL_BORDER},
                         "element": {
                             "type": "plain_text_input",
                             "action_id": "border_difficulty",
-                            "max_length": 2
+                            "max_length": 2,
+                            "placeholder": {"type": "plain_text", "text": DIFFICULTY_HINT},
+                            "initial_value": updated_task.get("border_difficulty") or ""
                         }
                     },
                     # Usually a millimetre size, but "template" and split sizes
@@ -1904,7 +2046,6 @@ def handle_complete(ack, body, client):
 
 @app.view("trk_border_modal")
 def handle_border_submission(ack, body, client):
-    ack()
     user_id = body["user"]["id"]
     vals = body["view"]["state"]["values"]
     metadata = json.loads(body["view"]["private_metadata"])
@@ -1912,7 +2053,12 @@ def handle_border_submission(ack, body, client):
     dm_channel_id = metadata["dm_channel_id"]
 
     border_design = vals["border_design_block"]["border_design"]["value"]
-    border_difficulty = vals["border_diff_block"]["border_difficulty"]["value"]
+    border_difficulty, difficulty_error = read_difficulty(
+        vals["border_diff_block"]["border_difficulty"]["value"])
+    if difficulty_error:
+        ack(response_action="errors", errors={"border_diff_block": difficulty_error})
+        return
+    ack()
     border_jig = (vals["border_jig_block"]["border_jig"]["value"] or "").strip()
 
     try:
@@ -2425,11 +2571,12 @@ def handle_edit(ack, body, client):
                 {
                     "type": "input",
                     "block_id": "difficulty_block",
-                    "label": {"type": "plain_text", "text": "Field difficulty"},
+                    "label": {"type": "plain_text", "text": DIFFICULTY_LABEL_FIELD},
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "difficulty",
                         "max_length": 2,
+                        "placeholder": {"type": "plain_text", "text": DIFFICULTY_HINT},
                         "initial_value": task["difficulty"] or ""
                     }
                 },
@@ -2470,7 +2617,11 @@ def handle_edit_submission(ack, body, client):
     invoice_number = vals["invoice_block"]["invoice_num"]["value"]
     task_description = vals["task_block"]["task_desc"]["value"]
     design = vals["design_block"]["design"]["value"]
-    difficulty = vals["difficulty_block"]["difficulty"]["value"]
+    difficulty, difficulty_error = read_difficulty(
+        vals["difficulty_block"]["difficulty"]["value"])
+    if difficulty_error:
+        ack(response_action="errors", errors={"difficulty_block": difficulty_error})
+        return
     # What the job said before the modal opened. Read first, because the due
     # date needs it too.
     task_before = database.get_task(task_id)
