@@ -565,13 +565,14 @@ def _finish_button(task):
     if not on_it_now and work_elapsed(task, cursor, "production") <= 0:
         return None
     label = FINISH_LABELS[cursor]
-    # Whichever move this card actually offers for leaving the lane unfinished.
-    # Naming a button that is not there is how a maker gets sent looking for
-    # one: the other work is a row on the card now, so that is what this says,
-    # and at packing both other lanes are done so there is nowhere to go and
-    # Pause is the only way to leave it.
-    leave_unfinished = ("the other work on this card" if switch_destinations(task)
-                        else "Pause")
+    # Pause, always. Naming a button that is not there is how a maker gets sent
+    # looking for one, and every attempt to name the OTHER move has needed this
+    # line to work out what the card ended up showing - first Switch work,
+    # which is not on a packing card, then the other-work row, which is empty
+    # once every other lane is done. Pause is on every card that can offer a
+    # finish, so it needs no working out, and the other work is visible on the
+    # card anyway for the maker who wants it.
+    leave_unfinished = "Pause"
     return _button(
         label,
         "trk_complete_task",
