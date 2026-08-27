@@ -290,3 +290,61 @@ two live timers however clicks race or repeat. Completing a phase now refuses
 while another phase's timer runs, and the border-skip revert refuses only for
 a live timer or finished packing. Arrived in the single feature commit on
 `feature/packing-interruption`.
+
+## Setup, cutting, and the card rebuilt (2026-08-27)
+
+The largest change to what a maker sees since the baseline. Three things, and
+they belong together because they are all answers to the same complaint: the
+card told the maker about the database rather than about the job.
+
+**The job starts when it is handed over.** The details form no longer asks for
+a jig size — a maker filling it in has just been given the job and normally
+does not know the jig yet, and calling the box "optional" did not make asking
+any less premature. Submitting the form is the handover into the workshop, so
+the setup clock is running by the time the card appears and there is no
+"Start" button: there is nothing left to start. The jig is asked for on the
+card instead, under "Set jig / template", at the point it can be answered —
+finding and testing it IS the setup.
+
+**Setup is timed work, not pause time.** Getting the job organised, checking
+what was supplied, fetching the tiles, reading the drawings, finding the jig.
+It pauses and resumes like anything else, and "Start field sheeting" closes it
+and opens the sheeting. It sits underneath the Field and Border work rather
+than beside it, so the job still runs Field → Border → Packing and a lane's
+time is its setup plus its sheeting, reported as two lines that add up.
+
+**Cutting is measured inside the sheeting, never beside it.** A maker sheeting
+a field goes downstairs and cuts tiles for twelve minutes; they never stopped
+working the field, so the field timer keeps running and "Start cutting" simply
+records how part of that hour was spent. Sixty minutes of field work
+containing twelve minutes of cutting is sixty minutes of labour — never
+seventy-two, and never forty-eight plus twelve. The cutting knows which work
+it belonged to (field cutting and border cutting stay distinguishable), and it
+closes when that work does, rather than running on against nothing.
+
+**"Switch work" replaces "Start Packing".** The old button was correct and
+read wrong: on a field card it looked like leaving the field behind for good.
+The new one opens a short form that says what is about to happen — your work
+pauses, nothing is marked finished, you can come back — and offers whatever
+the job actually allows, so a finished lane and a border nobody has described
+are not on the list. Packing interrupting the sheeting still works exactly as
+it did; it is now one of several moves rather than a special case.
+
+**And one card, built from what the job is.** It leads with the job, then what
+the maker is working on, then the time recorded, then what they can do next,
+with the rest of the job's details grouped underneath rather than given the
+same weight. Finishing a lane is one press that names the lane and asks first;
+once a lane is finished the same place says what is owed next ("Enter border
+details"). Refusals say what the job is doing and what to press instead.
+
+Agreed with Luis beforehand: no. This is workshop-originated, from watching
+the tracker in real use — the jig question came too early, "Start" was on a
+job already begun, and the cards read as a data dump. It changes no rule from
+the creator review: nothing auto-starts a timer except the handover the maker
+themselves submits, one person still times one thing at a time, and packing
+still only ever moves the job on when the maker says so.
+
+LMSA side: a `job_segments.activity` column (setup or production), a separate
+`job_contained_segments` ledger for cutting so no total can pick it up twice,
+and "one open segment per person" as a database rule rather than only a
+handler check. Arrived in the single feature commit on `feature/workshop-flow`.

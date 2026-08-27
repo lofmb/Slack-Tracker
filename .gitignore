@@ -1,0 +1,4 @@
+# Python leaves bytecode next to the module it imported. It is machine output,
+# and a stray .pyc in a commit is noise at best.
+__pycache__/
+*.pyc
