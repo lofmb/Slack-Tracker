@@ -1,5 +1,6 @@
 import os
 import json
+import datetime
 import openpyxl
 from dotenv import load_dotenv
 from slack_bolt import App
@@ -595,6 +596,53 @@ def _fields(task):
 NO_DUE_DATE = "Not set"
 
 
+DUE_DATE_LABEL = "Due date (DD/MM/YY)"
+DUE_DATE_HINT = "e.g. 01/09/26 - or leave blank"
+DUE_DATE_ERROR = ("Enter the date as DD/MM/YY, for example 01/09/26. "
+                  "If nobody has given you one, leave it blank.")
+
+
+def read_due_date(typed):
+    """
+    What the maker meant by what they typed in the due date box.
+
+    Returns (text to store, error to show them). The text is None when no date
+    has been supplied: a blank box, or the "N/A" the old form used to write,
+    which is read as the same thing so retyping it cannot mint another one.
+
+    The box says DD/MM/YY, so it now means it. It accepted anything for years,
+    which made the label a suggestion rather than a promise - "Friday" was
+    stored and shown as a due date that nothing could sort by or chase. A real
+    date is stored the way the label reads, whatever separator was typed and
+    whether the year was given as two digits or four, so every card says it the
+    same way.
+
+    The date has to exist: 31/02/26 is refused here rather than accepted and
+    then rejected by the database, where the maker would see nothing useful.
+
+    This governs TYPING ONLY. Rows already holding free text keep it, and are
+    read back untouched.
+    """
+    raw = (typed or "").strip()
+    if not raw or raw.upper() == "N/A":
+        return None, None
+    for separator in ("/", "-", "."):
+        parts = raw.split(separator)
+        if len(parts) != 3 or not all(p.isdigit() for p in parts):
+            continue
+        day, month, year = parts
+        if len(year) == 2:
+            year = "20" + year
+        if len(year) != 4:
+            break
+        try:
+            datetime.date(int(year), int(month), int(day))
+        except ValueError:
+            break
+        return "%02d/%02d/%s" % (int(day), int(month), year[2:]), None
+    return None, DUE_DATE_ERROR
+
+
 def due_date_supplied(task):
     """
     The due date the maker was given, or None when nobody has given them one.
@@ -981,7 +1029,7 @@ def track_command(ack, body, client):
                 {
                     "type": "input",
                     "block_id": "customer_block",
-                    "label": {"type": "plain_text", "text": "Customer Name"},
+                    "label": {"type": "plain_text", "text": "Customer name"},
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "customer_name"
@@ -990,7 +1038,7 @@ def track_command(ack, body, client):
                 {
                     "type": "input",
                     "block_id": "invoice_block",
-                    "label": {"type": "plain_text", "text": "Invoice Number"},
+                    "label": {"type": "plain_text", "text": "Invoice number"},
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "invoice_num"
@@ -1010,14 +1058,11 @@ def track_command(ack, body, client):
                     "type": "input",
                     "block_id": "date_block",
                     "optional": True,
-                    "label": {"type": "plain_text", "text": "Due date (DD/MM/YY)"},
+                    "label": {"type": "plain_text", "text": DUE_DATE_LABEL},
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "due_date",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "e.g. 01/09/26 - leave blank if you have not been given one"
-                        }
+                        "placeholder": {"type": "plain_text", "text": DUE_DATE_HINT}
                     }
                 }
             ]
@@ -1230,7 +1275,12 @@ def handle_step_1(ack,body,client,):
     task_description = vals["task_block"]["task_desc"]["value"]
     # An empty box is carried as nothing at all, not as the word "N/A". Nobody
     # has given this maker a date yet; that is not a job with no deadline.
-    due_date = (vals["date_block"]["due_date"]["value"] or "").strip() or None
+    due_date, due_date_error = read_due_date(vals["date_block"]["due_date"]["value"])
+    if due_date_error:
+        # Sent back to the box it belongs to, so the maker reads the message
+        # under the date rather than losing the whole form.
+        ack(response_action="errors", errors={"date_block": due_date_error})
+        return
 
     #Bundling Step 1 data to pass forward
     step1_data = {
@@ -2296,10 +2346,15 @@ def handle_edit(ack, body, client):
                     "type": "input",
                     "block_id": "date_block",
                     "optional": True,
-                    "label": {"type": "plain_text", "text": "Due Date (DD/MM/YYYY)"},
+                    # The same field as the intake form, so the same words,
+                    # the same format and the same rules. Two contracts for one
+                    # box is how "DD/MM/YYYY" here and "DD/MM/YY" there both
+                    # ended up describing the same column.
+                    "label": {"type": "plain_text", "text": DUE_DATE_LABEL},
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "due_date",
+                        "placeholder": {"type": "plain_text", "text": DUE_DATE_HINT},
                         "initial_value": due_date_supplied(task) or ""
                     }
                 }
@@ -2310,7 +2365,6 @@ def handle_edit(ack, body, client):
 
 @app.view("trk_edit_task_modal")
 def handle_edit_submission(ack, body, client):
-    ack()
     user_id = body["user"]["id"]
     vals = body["view"]["state"]["values"]
 
@@ -2325,13 +2379,30 @@ def handle_edit_submission(ack, body, client):
     task_description = vals["task_block"]["task_desc"]["value"]
     design = vals["design_block"]["design"]["value"]
     difficulty = vals["difficulty_block"]["difficulty"]["value"]
-    # Same meaning as the intake box: cleared means nobody has given a date,
-    # which is carried as nothing rather than as the word "N/A".
-    due_date = (vals["date_block"]["due_date"]["value"] or "").strip() or None
+    # What the job said before the modal opened. Read first, because the due
+    # date needs it too.
+    task_before = database.get_task(task_id)
+
+    # Same box, same rules as the intake form. One exception, and it is about
+    # history rather than about dates: a row written before this screen asked
+    # for a real date may hold free text, which the form pre-fills. Judging
+    # that on submit would stop a maker fixing a customer's name until they had
+    # also rewritten a due date they never touched. So a value that comes back
+    # exactly as it was stored passes through untouched - that is not new
+    # typing, and nothing about it is being changed.
+    typed_due_date = vals["date_block"]["due_date"]["value"]
+    stored_due_date = (task_before["due_date"] if task_before else None) or ""
+    if stored_due_date.strip() and (typed_due_date or "").strip() == stored_due_date.strip():
+        due_date = stored_due_date
+    else:
+        due_date, due_date_error = read_due_date(typed_due_date)
+        if due_date_error:
+            ack(response_action="errors", errors={"date_block": due_date_error})
+            return
+    ack()
 
     # What each jig said before the modal opened, so only boxes the maker
     # actually changed get corrected
-    task_before = database.get_task(task_id)
     previous_jigs = {}
     if task_before is not None:
         for rec in task_before["field_jig_records"] + task_before["border_jig_records"]:
