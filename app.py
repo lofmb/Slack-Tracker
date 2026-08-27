@@ -355,6 +355,27 @@ def _finish_button(task):
     )
 
 
+def lane_finish_is_new(task):
+    """
+    Whether this press is actually finishing a lane, or only reopening a form.
+
+    The finish button carries two jobs (see NEXT_STEP_LABELS): it closes a
+    lane, and once the lane is closed it becomes the way back to the form that
+    lane still owes - after a cancelled modal, or a "no border" taken back.
+    Only the first is something that happened; the second is a maker returning
+    to paperwork.
+
+    The team channel hears about the first only. Announcing both put "Field
+    sheeting finished" in the channel twice, two minutes apart, with identical
+    figures, for a lane that was finished once - which reads as the field
+    having been done again.
+
+    Same test the button itself uses to decide its label, so what the card
+    calls the press and whether the channel hears about it cannot drift apart.
+    """
+    return lane_state(task, task["current_phase"]) != "complete"
+
+
 def delete_still_applies(task):
     """
     Whether this job could still be one that should never have been entered.
@@ -1558,6 +1579,10 @@ def handle_complete(ack, body, client):
     if task is None:
         return
 
+    # Read before the lane closes: afterwards every lane looks finished, and
+    # the difference between finishing one and returning to its form is gone.
+    announce = lane_finish_is_new(task)
+
     outcome = database.complete_task(task_id)
     if outcome != "completed":
         client.chat_postEphemeral(
@@ -1577,19 +1602,20 @@ def handle_complete(ack, body, client):
     update_card(client, updated_task, channel_id)
 
     if phase == "field_sheeting":
-        client.chat_postMessage(
-            channel=task["channel_id"],
-            text=f"T-{task_id} {updated_task['customer_name']}: field sheeting finished",
-            blocks=[{
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (f"*T-{task_id}  {updated_task['customer_name']}*\n"
-                             f"Field sheeting finished by <@{user_id}>\n"
-                             f"{lane_report(updated_task, 'field_sheeting')}")
-                }
-            }]
-        )
+        if announce:
+            client.chat_postMessage(
+                channel=task["channel_id"],
+                text=f"T-{task_id} {updated_task['customer_name']}: field sheeting finished",
+                blocks=[{
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (f"*T-{task_id}  {updated_task['customer_name']}*\n"
+                                 f"Field sheeting finished by <@{user_id}>\n"
+                                 f"{lane_report(updated_task, 'field_sheeting')}")
+                    }
+                }]
+            )
 
         client.views_open(
             trigger_id=body["trigger_id"],
@@ -1666,19 +1692,20 @@ def handle_complete(ack, body, client):
         )
 
     elif phase == "border_sheeting":
-        client.chat_postMessage(
-            channel=task["channel_id"],
-            text=f"T-{task_id} {updated_task['customer_name']}: border finished",
-            blocks=[{
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (f"*T-{task_id}  {updated_task['customer_name']}*\n"
-                             f"Border finished by <@{user_id}>\n"
-                             f"{lane_report(updated_task, 'border_sheeting')}")
-                }
-            }]
-        )
+        if announce:
+            client.chat_postMessage(
+                channel=task["channel_id"],
+                text=f"T-{task_id} {updated_task['customer_name']}: border finished",
+                blocks=[{
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (f"*T-{task_id}  {updated_task['customer_name']}*\n"
+                                 f"Border finished by <@{user_id}>\n"
+                                 f"{lane_report(updated_task, 'border_sheeting')}")
+                    }
+                }]
+            )
 
         client.views_open(
             trigger_id=body["trigger_id"],
