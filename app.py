@@ -311,6 +311,10 @@ def _finish_button(task):
     if not on_it_now and work_elapsed(task, cursor, "production") <= 0:
         return None
     label = FINISH_LABELS[cursor]
+    # Whichever move this card actually offers for leaving the lane unfinished.
+    # At packing both other lanes are done, so there is nowhere to switch to
+    # and Switch work is not on the card; Pause is the one that leaves it.
+    leave_unfinished = "*Switch work*" if switch_destinations(task) else "*Pause*"
     return _button(
         label,
         "trk_complete_task",
@@ -322,7 +326,7 @@ def _finish_button(task):
                 "text": (
                     "This closes the *" + work_name(cursor, "production").lower() +
                     "* for good and moves the job on.\n\n"
-                    "Still something to do on it? Use *Switch work* instead - that "
+                    "Still something to do on it? Use " + leave_unfinished + " instead - that "
                     "leaves it unfinished and you can come back."
                 ),
             },
@@ -673,6 +677,12 @@ def job_card(task, note=None):
             "elements": actions,
         })
     footer = "Logged by <@" + task["user_id"] + ">"
+    on_setup = task.get("working_on") or {}
+    if on_setup.get("activity") == "setup":
+        # A job starts timing its setup the moment it exists, and nothing
+        # closes a timer left running overnight. Pause is already on the card;
+        # this says, where the risk actually is, what it is for.
+        footer += "  ·  Pause setup if you stop working on it - you can pick it up again any time."
     if any(b.get("action_id") == "trk_switch_work" for b in actions):
         footer += "  ·  Switching work or pausing never finishes anything."
     blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]})
@@ -787,9 +797,15 @@ def refusal_text(reason, task, phase=None):
             "Start the sheeting first. Cutting is recorded as part of the field or border work "
             "it happens during, so there has to be some running."
         ),
-        "not_running": "Nothing is being timed on this job at the moment.",
+        "not_running": (
+            "Nothing is being timed on this job at the moment - your card will show "
+            "what this job is up to and what you can start."
+        ),
         "already_cutting": "The cutting is already being timed.",
-        "not_cutting": "No cutting is being timed on this job at the moment.",
+        "not_cutting": (
+            "No cutting is being timed on this job at the moment - your card will show "
+            "what this job is up to and what you can start."
+        ),
         "job_not_open": "This job is no longer open, so nothing has been changed.",
     }
     return texts.get(reason, "That could not be done, so nothing has been changed.")
@@ -834,7 +850,7 @@ def track_command(ack, body, client):
         client.chat_postEphemeral(
             channel=body["channel_id"],
             user=user_id,
-            text=f"You have already have an active task: * {active_task['task_description']}*. Please complete or stop it before starting a new one."
+            text=f"You already have an active task: * {active_task['task_description']}*. Please complete or stop it before starting a new one."
             
         )
         return
@@ -844,7 +860,7 @@ def track_command(ack, body, client):
         view={
             "type": "modal",
             "callback_id": "trk_track_step_1",  # ID used to catch the submission
-            "title": {"type": "plain_text", "text": "Field Sheeting"},
+            "title": {"type": "plain_text", "text": "New job - 1 of 2"},
             "private_metadata":body["channel_id"],
             "submit": {"type": "plain_text", "text": "Next"},
             "close": {"type": "plain_text", "text": "Cancel"},
@@ -1134,8 +1150,8 @@ def handle_step_1(ack,body,client,):
     ack(response_action="push", view={
         "type": "modal",
         "callback_id": "trk_track_step_2",
-        "title": {"type": "plain_text", "text": "Field Design 2/2"},
-        "submit": {"type": "plain_text", "text": "Create Task"},
+        "title": {"type": "plain_text", "text": "Field design - 2 of 2"},
+        "submit": {"type": "plain_text", "text": "Create the job"},
         "close": {"type": "plain_text", "text": "Back"},
         "private_metadata": json.dumps(step1_data),
         "blocks": [
@@ -1144,7 +1160,7 @@ def handle_step_1(ack,body,client,):
                 "element":{"type": "plain_text_input", "action_id": "val"}
                 },
             {"type": "input", "block_id": "diff", "label":
-                {"type": "plain_text", "text": "Sheeting Difficulty"},
+                {"type": "plain_text", "text": "Field difficulty"},
                 "element":{"type": "plain_text_input", "action_id": "difficulty", "max_length": 2}
                 }
             # No jig question here. A maker filling this in has just been handed
@@ -1514,7 +1530,7 @@ def handle_complete(ack, body, client):
                 "type": "modal",
                 "callback_id": "trk_border_modal",
                 "title": {"type": "plain_text", "text": "Border details"},
-                "submit": {"type": "plain_text", "text": "Save and go to the border"},
+                "submit": {"type": "plain_text", "text": "Save the border details"},
                 "close": {"type": "plain_text", "text": "Cancel"},
                 "private_metadata": metadata,
                 "blocks": [
@@ -2085,7 +2101,7 @@ def handle_edit(ack, body, client):
         jig_blocks.append({
             "type": "input",
             "block_id": f"jig_edit_{rec['id']}",
-            "label": {"type": "plain_text", "text": f"Field Jig {i} (mm)"},
+            "label": {"type": "plain_text", "text": f"Field jig {i} (or template)"},
             "element": {
                 "type": "plain_text_input",
                 "action_id": "jig_value",
@@ -2096,7 +2112,7 @@ def handle_edit(ack, body, client):
         jig_blocks.append({
             "type": "input",
             "block_id": f"jig_edit_{rec['id']}",
-            "label": {"type": "plain_text", "text": f"Border Jig {i} (mm)"},
+            "label": {"type": "plain_text", "text": f"Border jig {i} (or template)"},
             "element": {
                 "type": "plain_text_input",
                 "action_id": "jig_value",
@@ -2159,7 +2175,7 @@ def handle_edit(ack, body, client):
                 {
                     "type": "input",
                     "block_id": "difficulty_block",
-                    "label": {"type": "plain_text", "text": "Sheeting Difficulty"},
+                    "label": {"type": "plain_text", "text": "Field difficulty"},
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "difficulty",
