@@ -1123,12 +1123,38 @@ def update_task(task_id, customer, invoice, task_desc, design, difficulty, due_d
 
 def format_elapsed(seconds):
     # Format elapsed seconds into a readable hours/minutes/seconds string.
+    # Every unit always appears. The xlsx export uses this, where a column of
+    # the same shape is easier to scan down than one that changes width.
     if seconds is None:
         seconds = 0
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
     secs = seconds % 60
     return f"{hours} h {minutes}m {secs}s"
+
+
+def format_duration(seconds):
+    """
+    A duration as a person would say it: 50s, 3m 42s, 1h 3m 42s.
+
+    Units that would lead with a zero are left out, because "0 h 3m 42s" makes
+    a reader take in an hours figure that is not there before reaching the part
+    that matters. Nothing below the largest unit is dropped, so a duration is
+    still exact and two of them still sort by eye.
+
+    This is the WORKSHOP-FACING format. The export keeps format_elapsed.
+    """
+    if seconds is None:
+        seconds = 0
+    seconds = int(seconds)
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
 
 
 def get_completed_tasks():

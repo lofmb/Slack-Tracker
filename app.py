@@ -62,7 +62,7 @@ def border_time_display(task):
     """
     if task.get("border_skipped"):
         return "No Border"
-    return database.format_elapsed(task["border_elapsed"] or 0)
+    return database.format_duration(task["border_elapsed"] or 0)
 
 
 # ---------------------------------------------------------------------------
@@ -330,18 +330,21 @@ def _finish_button(task):
     # Whichever move this card actually offers for leaving the lane unfinished.
     # At packing both other lanes are done, so there is nowhere to switch to
     # and Switch work is not on the card; Pause is the one that leaves it.
-    leave_unfinished = "*Switch work*" if switch_destinations(task) else "*Pause*"
+    leave_unfinished = "Switch work" if switch_destinations(task) else "Pause"
     return _button(
         label,
         "trk_complete_task",
         work_value(task["task_id"]),
         confirm={
             "title": {"type": "plain_text", "text": label + "?"},
+            # Slack renders a confirmation's text as PLAIN TEXT. Asterisks
+            # meant as emphasis are printed, so the maker read "*field
+            # sheeting*" with the asterisks in it.
             "text": {
-                "type": "mrkdwn",
+                "type": "plain_text",
                 "text": (
-                    "This closes the *" + work_name(cursor, "production").lower() +
-                    "* for good and moves the job on.\n\n"
+                    "This closes the " + work_name(cursor, "production").lower() +
+                    " for good and moves the job on.\n\n"
                     "Still something to do on it? Use " + leave_unfinished + " instead - that "
                     "leaves it unfinished and you can come back."
                 ),
@@ -350,6 +353,26 @@ def _finish_button(task):
             "deny": {"type": "plain_text", "text": "Not yet"},
         },
     )
+
+
+def delete_still_applies(task):
+    """
+    Whether this job could still be one that should never have been entered.
+
+    Delete is that correction, and it is only honest while nothing has been
+    made yet. "Setup" alone does not say so: the BORDER's setup is reached with
+    the field worked and finished behind it, and offering to take the job off
+    the list there put a red button beside several hours of real labour.
+
+    So the test is the state of the job, not the name of the activity - the job
+    is still on its first lane, and no lane has produced anything.
+    """
+    if task["current_phase"] != "field_sheeting":
+        return False
+    for phase in ("field_sheeting", "border_sheeting", "packing"):
+        if work_elapsed(task, phase, "production"):
+            return False
+    return True
 
 
 def _delete_button(task_id):
@@ -392,10 +415,8 @@ def card_actions(task):
         buttons.append(_button("Pause setup", "trk_stop_task", work_value(task_id)))
         buttons.append(_jig_button(task))
         buttons.append(_button("Edit details", "trk_edit_task", work_value(task_id)))
-        # The one place Delete is offered: a job logged by mistake is spotted
-        # here, before any of it has been made. Past that, a job that has to
-        # come off the list is a supervisor's correction, not a button.
-        buttons.append(_delete_button(task_id))
+        if delete_still_applies(task):
+            buttons.append(_delete_button(task_id))
         return buttons
 
     if here:
@@ -459,6 +480,10 @@ def card_actions(task):
         buttons.append(_button("Switch work", "trk_switch_work", work_value(task_id)))
     buttons.append(_jig_button(task))
     buttons.append(_button("Edit details", "trk_edit_task", work_value(task_id)))
+    # A job entered by mistake is as likely to be spotted on the paused card as
+    # on the running one - the maker stops, looks, and sees it is the wrong job.
+    if delete_still_applies(task):
+        buttons.append(_delete_button(task_id))
     finish = _finish_button(task)
     if finish:
         buttons.append(finish)
@@ -488,7 +513,7 @@ def _status_lines(task):
         if last:
             lines.append(
                 "Last on " + work_name(last["phase"], last["activity"]).lower() + ", "
-                + database.format_elapsed(work_elapsed(task, last["phase"], last["activity"]))
+                + database.format_duration(work_elapsed(task, last["phase"], last["activity"]))
                 + " recorded."
             )
         return lines
@@ -505,7 +530,7 @@ def _status_lines(task):
         )
     lines.append(
         name + " so far: *"
-        + database.format_elapsed(work_elapsed(task, here["phase"], here["activity"])) + "*"
+        + database.format_duration(work_elapsed(task, here["phase"], here["activity"])) + "*"
     )
     cutting = task.get("cutting_now")
     if cutting:
@@ -546,39 +571,58 @@ def _fields(task):
             for label, value in pairs[:10]]
 
 
-def _time_lines(task, total_label="Total so far"):
+def _lane_lines(task, phase):
     """
-    What has been recorded, one fact per line.
+    One lane's time, with its parts underneath in the shape they really have.
 
-    A line appears once there is something to say on it, so an early card is
-    short and a late one is complete. Cutting is written as part of the
-    sheeting line it happened inside, never as a line of its own: it is time
-    already counted, and a separate entry would read as time on top.
+    Setup and sheeting ADD UP to the lane's total. Cutting does not: it is time
+    spent inside the sheeting, already counted in it. Listing both after one
+    word - "includes 3m 42s setup, 50s cutting" - put two different
+    relationships in one sum, and the arithmetic then did not work: a maker
+    adding those two figures came up short of the lane total and had no way to
+    see why. So the parts sit under the lane, and the cutting sits under the
+    sheeting it happened in.
+
+    Packing has no setup, so its total IS its one figure and repeating it as a
+    part underneath would say nothing.
     """
     here = task.get("working_on") or {}
-    rows = []
+    on_this_lane = here.get("phase") == phase
+    setup = work_elapsed(task, phase, "setup")
+    production = work_elapsed(task, phase, "production")
+    if not setup and not production and not on_this_lane:
+        return []
 
-    def add(phase, activity):
-        seconds = work_elapsed(task, phase, activity)
-        current = here.get("phase") == phase and here.get("activity") == activity
-        if not seconds and not current:
-            return
-        line = work_name(phase, activity) + ": " + database.format_elapsed(seconds)
-        if activity == "production" and phase != "packing":
-            lane = "field" if phase == "field_sheeting" else "border"
-            cutting = task.get(lane + "_cutting_elapsed") or 0
-            if cutting:
-                line += "  _(includes " + database.format_elapsed(cutting) + " cutting)_"
-        rows.append(line)
+    label = LANE_NAMES[phase]
+    lines = ["*" + label + "*  " + database.format_duration(setup + production)]
+    if phase == "packing":
+        return lines
 
-    add("field_sheeting", "setup")
-    add("field_sheeting", "production")
+    if setup or (on_this_lane and here.get("activity") == "setup"):
+        lines.append("•  Setup  " + database.format_duration(setup))
+    if production or (on_this_lane and here.get("activity") == "production"):
+        lines.append("•  Sheeting  " + database.format_duration(production))
+        lane = "field" if phase == "field_sheeting" else "border"
+        cutting = task.get(lane + "_cutting_elapsed") or 0
+        if cutting:
+            lines.append("     ◦  of which cutting  " + database.format_duration(cutting))
+    return lines
+
+
+def _time_lines(task, total_label="Total job time"):
+    """
+    What has been recorded, lane by lane.
+
+    A lane appears once there is something to say about it, so an early card is
+    short and a late one is complete.
+    """
+    here = task.get("working_on") or {}
+    rows = _lane_lines(task, "field_sheeting")
     if task.get("border_skipped"):
-        rows.append("Border: No Border")
+        rows.append("*Border*  no border on this job")
     else:
-        add("border_sheeting", "setup")
-        add("border_sheeting", "production")
-    add("packing", "production")
+        rows += _lane_lines(task, "border_sheeting")
+    rows += _lane_lines(task, "packing")
 
     # Nothing worked yet: the status line has already said what the maker is on
     # and how long for, and repeating it under a heading is three noughts and no
@@ -586,7 +630,7 @@ def _time_lines(task, total_label="Total so far"):
     if not rows or not task["total_elapsed"]:
         return []
     return ["*Time recorded*"] + rows + [
-        total_label + ": *" + database.format_elapsed(task["total_elapsed"]) + "*"
+        "*" + total_label + "*  " + database.format_duration(task["total_elapsed"])
     ]
 
 
@@ -600,21 +644,8 @@ def lane_report(task, phase):
     two places.
     """
     if phase == "border_sheeting" and task.get("border_skipped"):
-        return "Border: no border on this job"
-    setup = work_elapsed(task, phase, "setup")
-    production = work_elapsed(task, phase, "production")
-    line = LANE_NAMES[phase] + ": " + database.format_elapsed(setup + production)
-    parts = []
-    if setup:
-        parts.append(database.format_elapsed(setup) + " setup")
-    if phase != "packing":
-        lane = "field" if phase == "field_sheeting" else "border"
-        cutting = task.get(lane + "_cutting_elapsed") or 0
-        if cutting:
-            parts.append(database.format_elapsed(cutting) + " cutting")
-    if parts:
-        line += "  _(includes " + ", ".join(parts) + ")_"
-    return line
+        return "*Border*  no border on this job"
+    return "\n".join(_lane_lines(task, phase))
 
 
 def job_summary_blocks(task, finished_by, general_notes, issues):
@@ -644,7 +675,7 @@ def job_summary_blocks(task, finished_by, general_notes, issues):
         },
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "\n".join(_time_lines(task, total_label="Total"))},
+            "text": {"type": "mrkdwn", "text": "\n".join(_time_lines(task))},
         },
         {
             "type": "section",
@@ -856,7 +887,7 @@ def track_command(ack, body, client):
         client.chat_postEphemeral(
             channel=body["channel_id"],
             user=user_id,
-            text=f"You already have an active task: * {active_task['task_description']}*. Please complete or stop it before starting a new one."
+            text=f"You already have an active job: {active_task['task_description']}. Finish or pause it before starting another."
             
         )
         return
@@ -892,7 +923,7 @@ def track_command(ack, body, client):
                 {
                     "type": "input",
                     "block_id": "task_block",
-                    "label": {"type": "plain_text", "text": "Task Description"},
+                    "label": {"type": "plain_text", "text": "Job description"},
                     "element": {
                         "type": "plain_text_input",
                         "multiline": True,
@@ -1874,7 +1905,7 @@ def handle_notes_submission(ack, body, client):
     database.save_notes_and_complete(task_id, general_notes, issues)
     task = database.get_task(task_id)
 
-    total_time = database.format_elapsed(task["total_elapsed"])
+    total_time = database.format_duration(task["total_elapsed"])
 
     client.chat_update(
         channel=dm_channel_id,
@@ -2039,7 +2070,7 @@ def handle_delete(ack, body, client):
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text="Task not found. It may have already been deleted."
+            text="That job is no longer on your list."
         )
         return
 
@@ -2048,24 +2079,28 @@ def handle_delete(ack, body, client):
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text="You can only delete your own tasks."
+            text="You can only take your own jobs off the list."
         )
         return
 
     # Delete from the database
     database.delete_task(task_id)
 
-    # Replace the card with a simple deleted message
+    # The card is replaced by what actually happened. Nothing is destroyed -
+    # LMSA cancels the job and keeps it, which is exactly why a maker may safely
+    # use this on a job that turned out to be a mistake. Saying "deleted" here
+    # contradicted the dialog they had just agreed to, one press earlier.
     client.chat_update(
         channel=channel_id,
         ts=task["message_ts"],
-        text=f"Task T-{task_id} has been deleted by <@{user_id}>.",
+        text=f"Job T-{task_id} was cancelled by <@{user_id}>. Its recorded time was kept.",
         blocks=[
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"❌ *Task T-{task_id} has been deleted by <@{user_id}>.*"
+                    "text": (f"*Job T-{task_id} was cancelled by <@{user_id}>.*"
+                             "\nIts recorded time and history have been kept.")
                 }
             }
         ]
@@ -2084,7 +2119,7 @@ def handle_edit(ack, body, client):
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text="Task not found. It may have been deleted."
+            text="That job is no longer on your list."
         )
         return
 
@@ -2092,7 +2127,7 @@ def handle_edit(ack, body, client):
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text="You can only edit your own tasks."
+            text="You can only edit your own jobs."
         )
         return
 
@@ -2135,7 +2170,7 @@ def handle_edit(ack, body, client):
         view={
             "type": "modal",
             "callback_id": "trk_edit_task_modal",
-            "title": {"type": "plain_text", "text": "Edit Task"},
+            "title": {"type": "plain_text", "text": "Edit job"},
             "submit": {"type": "plain_text", "text": "Save Changes"},
             "close": {"type": "plain_text", "text": "Cancel"},
             "private_metadata": edit_metadata,
@@ -2163,7 +2198,7 @@ def handle_edit(ack, body, client):
                 {
                     "type": "input",
                     "block_id": "task_block",
-                    "label": {"type": "plain_text", "text": "Task Description"},
+                    "label": {"type": "plain_text", "text": "Job description"},
                     "element": {
                         "type": "plain_text_input",
                         "multiline": True,
