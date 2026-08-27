@@ -268,6 +268,22 @@ def _button(text, action_id, value, style=None, confirm=None):
     return button
 
 
+def _start_button(text, task_id, phase, activity, style=None):
+    """
+    A button that opens a piece of work and starts timing it.
+
+    Slack requires an action_id to be UNIQUE within a message, and a card
+    legitimately offers a lane's setup beside its sheeting - "Start border
+    setup" next to "Start border sheeting", or "Resume field setup" next to
+    "Start field sheeting". So the id says WHICH of the two is being asked
+    for, rather than leaving two identical ids to be told apart by a value
+    Slack never looks at. Both reach the same handler; the value still carries
+    the job, the lane and the activity.
+    """
+    action_id = "trk_start_setup" if activity == "setup" else "trk_start_production"
+    return _button(text, action_id, work_value(task_id, phase, activity), style=style)
+
+
 def _jig_button(task):
     """
     Set jig / Add jig.
@@ -369,11 +385,9 @@ def card_actions(task):
     if here and here["activity"] == "setup":
         # Setting up. The forward move is the sheeting itself, and this is the
         # moment the jig becomes known, so both are on the card.
-        buttons.append(_button(
+        buttons.append(_start_button(
             "Start " + work_name(here["phase"], "production").lower(),
-            "trk_start_task",
-            work_value(task_id, here["phase"], "production"),
-            style="primary",
+            task_id, here["phase"], "production", style="primary",
         ))
         buttons.append(_button("Pause setup", "trk_stop_task", work_value(task_id)))
         buttons.append(_jig_button(task))
@@ -396,11 +410,9 @@ def card_actions(task):
         # Packing worked as an interruption: the way back to the waiting
         # sheeting is one press, because that is the common one.
         if here["phase"] != cursor and cursor != "completed" and lane_open(task, cursor):
-            buttons.append(_button(
+            buttons.append(_start_button(
                 "Back to " + work_name(cursor, "production").lower(),
-                "trk_start_task",
-                work_value(task_id, cursor, "production"),
-                style="primary",
+                task_id, cursor, "production", style="primary",
             ))
         if switch_destinations(task):
             buttons.append(_button("Switch work", "trk_switch_work", work_value(task_id)))
@@ -422,32 +434,26 @@ def card_actions(task):
             # A sheeting lane nobody has started yet. Setup comes first, the
             # same way it does on the field, and the sheeting is right beside
             # it for a job that needs no preparing.
-            buttons.append(_button(
+            buttons.append(_start_button(
                 "Start " + work_name(resume[0], "setup").lower(),
-                "trk_start_task",
-                work_value(task_id, resume[0], "setup"),
-                style="primary",
+                task_id, resume[0], "setup", style="primary",
             ))
-            buttons.append(_button(
+            buttons.append(_start_button(
                 "Start " + work_name(resume[0], "production").lower(),
-                "trk_start_task",
-                work_value(task_id, resume[0], "production"),
+                task_id, resume[0], "production",
             ))
         else:
             # "Resume" only where there is something to resume; a lane with no
             # time on it is being started, whatever the ledger last recorded.
             verb = "Resume" if work_elapsed(task, resume[0], resume[1]) else "Start"
-            buttons.append(_button(
+            buttons.append(_start_button(
                 verb + " " + work_name(*resume).lower(),
-                "trk_start_task",
-                work_value(task_id, resume[0], resume[1]),
-                style="primary",
+                task_id, resume[0], resume[1], style="primary",
             ))
             if resume[1] == "setup":
-                buttons.append(_button(
+                buttons.append(_start_button(
                     "Start " + work_name(resume[0], "production").lower(),
-                    "trk_start_task",
-                    work_value(task_id, resume[0], "production"),
+                    task_id, resume[0], "production",
                 ))
     if switch_destinations(task):
         buttons.append(_button("Switch work", "trk_switch_work", work_value(task_id)))
@@ -1220,15 +1226,18 @@ def handle_step_2(ack, body, client):
               f"with the bot.")
     )
 
-@app.action("trk_start_task")
+@app.action("trk_start_setup")
+@app.action("trk_start_production")
 def handle_start(ack, body, client):
     """
     Move onto a piece of work and start timing it.
 
     One handler behind every button that does that: Start field sheeting,
-    Resume, and Back to field sheeting. The button says which work it means;
-    a button posted by an earlier version of the tracker says only which job,
-    and then the lane the job is on is what resumes.
+    Resume, Start border setup and Back to field sheeting. The two action ids
+    exist because Slack will not accept the same one twice in a message, not
+    because the work differs - the value carries which lane and which activity,
+    and a button posted by an earlier version of the tracker says only which
+    job, so the lane the job is on is what resumes.
     """
     ack()
     task_id, phase, activity = read_work_value(body["actions"][0]["value"])
