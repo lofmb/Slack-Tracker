@@ -566,9 +566,12 @@ def _finish_button(task):
         return None
     label = FINISH_LABELS[cursor]
     # Whichever move this card actually offers for leaving the lane unfinished.
-    # At packing both other lanes are done, so there is nowhere to switch to
-    # and Switch work is not on the card; Pause is the one that leaves it.
-    leave_unfinished = "Switch work" if switch_destinations(task) else "Pause"
+    # Naming a button that is not there is how a maker gets sent looking for
+    # one: the other work is a row on the card now, so that is what this says,
+    # and at packing both other lanes are done so there is nowhere to go and
+    # Pause is the only way to leave it.
+    leave_unfinished = ("the other work on this card" if switch_destinations(task)
+                        else "Pause")
     return _button(
         label,
         "trk_complete_task",
@@ -1083,7 +1086,7 @@ def border_route(task):
             continue
         if "border_sheeting" in (button.get("value") or ""):
             return "Start the border when you are ready."
-    return "Use Switch work and choose the border when you are ready."
+    return "The border is under *Other work on this job* when you are ready."
 
 
 def job_card(task, note=None):
@@ -1152,8 +1155,8 @@ def job_card(task, note=None):
         # closes a timer left running overnight. Pause is already on the card;
         # this says, where the risk actually is, what it is for.
         footer += "  ·  Pause setup if you stop working on it - you can pick it up again any time."
-    if any(b.get("action_id") == "trk_switch_work" for b in actions):
-        footer += "  ·  Switching work or pausing never finishes anything."
+    if other_work_buttons(task):
+        footer += "  ·  Moving to other work, or pausing, never finishes anything."
     blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]})
 
     here = task.get("working_on")
@@ -1251,8 +1254,8 @@ def refusal_text(reason, task, phase=None):
             "then try again."
         ),
         "other_activity_running": (
-            "You are on " + (doing or "other work") + " on this job. Use *Switch work* to "
-            "move across - it pauses what you are doing rather than finishing it."
+            "You are on " + (doing or "other work") + " on this job. Pick it from *Other work "
+            "on this job* on the card - that pauses what you are doing rather than finishing it."
         ),
         "phase_already_complete": (
             "The " + lane + " is already finished on this job, so it cannot be started again."
@@ -2054,7 +2057,7 @@ def handle_start_packing(ack, body, client):
     """
     Go and pack for a while, leaving the sheeting where it is.
 
-    New cards say Switch work and go through the form above. This stays
+    New cards put the other work on the card itself. This stays
     registered because a card posted by an earlier version of the tracker is
     still live in somebody's DM, and it should keep working rather than fall
     silent the moment a deployment lands.
