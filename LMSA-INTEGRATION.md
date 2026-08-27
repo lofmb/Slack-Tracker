@@ -348,3 +348,90 @@ LMSA side: a `job_segments.activity` column (setup or production), a separate
 `job_contained_segments` ledger for cutting so no total can pick it up twice,
 and "one open segment per person" as a database rule rather than only a
 handler check. Arrived in the single feature commit on `feature/workshop-flow`.
+
+## Reading the flow as a maker reads it (2026-08-27)
+
+Every card, form, confirmation and refusal the workflow can produce was read the
+way someone on the workshop floor reads it, against one standard: which job is
+this, what am I working on, what time has been recorded, what can I do next. The
+shape held up. The wording did not, in eight places, and one form could not open
+at all.
+
+**The border details form never opened.** Its submit button read "Save and go to
+the border" — twenty-five characters, and Slack caps a view's submit at
+twenty-four. Slack does not shorten an over-long label; it refuses the whole
+form. So a maker who finished the field sheeting pressed the button and got
+silence, on the one form no job with a border can route around. It now reads
+"Save the border details", which is also truer: submitting saves the details, and
+the maker starts the border when they are ready.
+
+**A lane announced itself finished twice.** The button that finishes a lane is
+the same button that reopens a form the maker cancelled, so pressing it again to
+get back into the border form told the team the field had just finished for a
+second time. It now announces only the first time, when the lane genuinely
+changes state.
+
+**And the wording.** The intake form was titled after work the maker was not
+about to do; the packing confirmation advised a button that is never on a packing
+card; editing a jig asked for millimetres when `template` is a legitimate value;
+two refusals said only what was *not* happening, which is no use to someone whose
+card went stale in another window; the setup card never mentioned that pausing
+finishes nothing, on the one card where a forgotten timer costs an evening. Each
+now says what is actually true of the job in front of the maker.
+
+Agreed with Luis beforehand: no. This is workshop-originated, from reading the
+real surface rather than the transitions. It changes no rule from the creator
+review — the same phases, the same one-timer-per-person, the same manual packing.
+
+LMSA side: nothing. These are Slack-facing corrections. A test now walks every
+modal in the vendored tree and measures its title, submit and close against
+Slack's twenty-four-character limit, because no proof we had could have caught
+the border form: the harnesses drive a fake Slack that accepts any payload.
+
+## The due date means DD/MM/YY (2026-08-27)
+
+The intake form used to ask for a due date twice: a text box labelled DD/MM/YY,
+and a "No Set Date?" checkbox beside it that overrode whatever had been typed.
+Two controls for one fact, and the second one described a state the workshop does
+not have. **Every job needs doing as soon as practicable**, so there is no such
+thing as a job with no deadline — only a job where nobody has told us a date.
+
+So the checkbox is gone and the box means what its label says. `01/09/26`,
+`1/9/26`, `01/09/2026`, `01-09-26` and `01.09.26` all store `01/09/26`, so every
+card reads the same way. Blank means nobody supplied a date, and shows as **Not
+set** — not "N/A", which is a form-filling word, not a workshop one. Typing "N/A"
+stores nothing rather than minting a new sentinel. Anything else — "Friday",
+"when the paint arrives", or an impossible date like `31/02/26` — is refused at
+the form, in words, before the job is created. That last part matters more than
+it looks: the date was only ever checked against a pattern, so `31/02/26` would
+have passed the form and failed in the database, where the maker sees nothing
+useful at all.
+
+The Edit form asks the same question the same way, with one exception: a value
+that comes back exactly as it was stored passes through untouched. Historical
+rows hold free text, and a maker correcting a customer's name should not be
+blocked until they also rewrite a date they never touched.
+
+Historical `N/A` rows are left alone. They read as "Not set" wherever a person
+sees them, and nothing was rewritten.
+
+Agreed with Luis beforehand: no. His form had the checkbox and stored `N/A`; this
+is a later business rule from Tom, who owns the workshop process. It is recorded
+here as a deliberate change to his design, not as a correction of a defect.
+
+LMSA side: none. `due_date_not_applicable` stays in the schema as history and is
+still read faithfully; the adapter stores whatever it is handed, and the
+validation lives on the form, which is what keeps backfills and the word-for-word
+parity check honest.
+
+## Known defect, deliberately not fixed: the export confirmation never fires
+
+Recorded here so it is not mistaken for hygiene debt. In `handle_export`, the
+"Export ready! Check your DMs" message sits *after* an unconditional `raise`
+inside the `except` block, so Python can never reach it. A maker who exports
+successfully gets silence and may well run it again.
+
+It is not ours: the same shape is in the original at `app.py:262-270`, so it has
+never fired for anyone. It was left untouched during the readability pass because
+fixing it makes a message start sending, which is a change in behaviour and not a
+change in how the code reads. It needs its own change, and its own entry here.
