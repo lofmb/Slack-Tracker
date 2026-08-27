@@ -875,15 +875,22 @@ def _advance_cursor(job_id, phase, actor, operation):
             raise
 
 
-def move_to_border_phase(task_id, border_design, border_difficulty, border_jig=None):
+def move_to_border_phase(task_id, border_design, border_difficulty, border_jig=None,
+                         advance_cursor=True):
     """
-    Record what the border modal collected, and move the cursor onto border.
+    Record what the border modal collected, and usually move the cursor onto it.
 
     Two calls, because they are two different facts: what the maker typed, and
     where the maker now is. Each carries its own idempotency key, so a
     redelivered submission repeats neither. If the second call is the one that
     fails, the cursor stays on field: pressing Complete re-opens this same
     modal, and submitting it again finishes the move.
+
+    advance_cursor=False keeps the first fact and drops the second. The card
+    offers this form whenever the maker already knows what the border is, so
+    that a border the diagram shows is not locked behind finishing the field -
+    but describing work is not the same as arriving at it, and the job stays
+    where it is until its turn genuinely comes.
     """
     resolved = _row_for(task_id)
     if resolved is None:
@@ -921,7 +928,8 @@ def move_to_border_phase(task_id, border_design, border_difficulty, border_jig=N
     except TrackerRefused as refusal:
         if refusal.reason != "already_processed":
             raise
-    _advance_cursor(job_id, "border_sheeting", actor, "move_to_border_phase_cursor")
+    if advance_cursor:
+        _advance_cursor(job_id, "border_sheeting", actor, "move_to_border_phase_cursor")
 
 
 def move_to_packing_phase(task_id):

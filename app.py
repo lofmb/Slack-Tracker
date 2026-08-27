@@ -83,6 +83,97 @@ def packing_modal_view(metadata, summary_text):
     }
 
 
+def border_modal_view(task, metadata, summary_text, offer_no_border=True):
+    """
+    The border details form.
+
+    Two ways in, and the difference is only WHEN the maker knows. Finishing the
+    field opens it because that is when the border's turn arrives; the card
+    opens it whenever the maker already knows what the border is, so that a
+    border the diagram shows is not locked behind finishing a field. The form
+    itself is the same either way, which is the point of building it once.
+
+    "This job has no border" belongs to the first route only. Declaring the
+    border absent is a decision about the job's shape, and the moment for it is
+    the border's own turn - not while the field is still being worked.
+    """
+    blocks = [{
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": summary_text},
+    }]
+    blocks.extend([
+                {
+                    "type": "input",
+                    "block_id": "border_design_block",
+                    "label": {"type": "plain_text", "text": "Border design"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "border_design",
+                        # Prefilled when the diagram already said what the
+                        # border is. Known at intake, worked now - and
+                        # still correctable here, which is the point of
+                        # asking again rather than assuming.
+                        "initial_value": task.get("border_design") or ""
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "border_diff_block",
+                    "label": {"type": "plain_text", "text": DIFFICULTY_LABEL_BORDER},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "border_difficulty",
+                        "max_length": 2,
+                        "placeholder": {"type": "plain_text", "text": DIFFICULTY_HINT},
+                        "initial_value": task.get("border_difficulty") or ""
+                    }
+                },
+                # Usually a millimetre size, but "template" and split sizes
+                # are real entries too. Optional here because the border
+                # jig is often established during the border setup, and the
+                # card can take it then.
+                {
+                    "type": "input",
+                    "block_id": "border_jig_block",
+                    "optional": True,
+                    "label": {"type": "plain_text", "text": "Border jig or template"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "border_jig",
+                        "placeholder": {"type": "plain_text",
+                                        "text": "e.g. 49.6 or template - leave blank if not known yet"}
+                    }
+                },
+                # Some jobs genuinely have no border. This is the moment the
+                # maker knows that, so it is the moment they are asked - it
+                # is deliberately not on the intake form, where it would be
+                # one more thing to answer before the job can start.
+                {
+                    "type": "actions",
+                    "block_id": "no_border_block",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "This job has no border"},
+                            "action_id": "trk_no_border",
+                            "value": str(task["task_id"])
+                        }
+                    ]
+                }
+    ])
+    if not offer_no_border:
+        blocks = [b for b in blocks if b.get("block_id") != "no_border_block"]
+    return {
+        "type": "modal",
+        "callback_id": "trk_border_modal",
+        "title": {"type": "plain_text", "text": "Border details"},
+        "submit": {"type": "plain_text", "text": "Save the border details"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "private_metadata": metadata,
+        "blocks": blocks,
+    }
+
+
 def notes_modal_view(metadata, summary_text):
     """
     The last form: what happened, before the job closes.
@@ -293,6 +384,62 @@ def switch_destinations(task):
     return out
 
 
+def other_work_buttons(task, already_offered=()):
+    """
+    Every other piece of work on this job the maker may move to, as buttons.
+
+    The job is not a wizard. A maker preparing a field may need the border
+    first, may come back, may pack in between - and none of that finishes what
+    they moved away from. switch_destinations() already knows which work is
+    legitimately available, so this simply puts each one on the card instead of
+    behind a form: the press IS the choice, and a button that says "Start
+    border setup" needs no screen to explain itself.
+
+    The lane the job's cursor is on leads, because after a packing interruption
+    "back to the sheeting that is waiting" is the common move.
+    """
+    task_id = task["task_id"]
+    cursor = task["current_phase"]
+    buttons = []
+    for destination in switch_destinations(task):
+        phase, activity = destination["phase"], destination["activity"]
+        # The row above already offers the forward move out of a setup, and
+        # the way back onto a paused lane. Repeating either here would be the
+        # same press twice, which reads as two different things to do.
+        if work_value(task_id, phase, activity) in already_offered:
+            continue
+        leading = phase == cursor and activity == "production" and phase != (
+            (task.get("working_on") or {}).get("phase")
+        )
+        label = work_name(phase, activity)
+        if leading and work_elapsed(task, phase, activity):
+            label = "Back to " + label.lower()
+        buttons.append(_start_button(
+            label, task_id, phase, activity, style="primary" if leading else None,
+        ))
+    return buttons
+
+
+def border_details_button(task):
+    """
+    Describe the border before its turn comes.
+
+    A border the diagram shows but nobody has described yet cannot be worked -
+    there is nothing to work on. That was fine while the border was always
+    reached by finishing the field, and wrong now: the field is not a gate, and
+    a maker who knows what the border is should be able to say so and go and do
+    it. Opening the form from here records the details WITHOUT moving the
+    job's cursor; finishing the field still moves it, exactly as before.
+    """
+    if not lane_open(task, "border_sheeting"):
+        return None
+    if task.get("border_design"):
+        return None
+    if task.get("border_skipped"):
+        return None
+    return _button("Add border details", "trk_border_details", work_value(task["task_id"]))
+
+
 def resume_target(task):
     """
     What Resume means on a paused card: the last thing the maker was doing.
@@ -349,19 +496,28 @@ def _button(text, action_id, value, style=None, confirm=None):
     return button
 
 
-def _start_button(text, task_id, phase, activity, style=None):
-    """
-    A button that opens a piece of work and starts timing it.
+# One action_id per piece of work. Slack requires an action_id to be unique
+# within its block, and a card now offers every piece of unfinished work on the
+# job side by side - field sheeting next to border setup next to packing. Ids
+# that said only "setup" or "production" collided the moment two lanes were
+# offered together, which is the defect that stopped a card rendering at all.
+# All of them reach the same handler; the value still carries the job, the lane
+# and the activity.
+START_ACTION_IDS = {
+    ("field_sheeting", "setup"): "trk_start_field_setup",
+    ("field_sheeting", "production"): "trk_start_field_production",
+    ("border_sheeting", "setup"): "trk_start_border_setup",
+    ("border_sheeting", "production"): "trk_start_border_production",
+    ("packing", "production"): "trk_start_packing_production",
+}
 
-    Slack requires an action_id to be UNIQUE within a message, and a card
-    legitimately offers a lane's setup beside its sheeting - "Start border
-    setup" next to "Start border sheeting", or "Resume field setup" next to
-    "Start field sheeting". So the id says WHICH of the two is being asked
-    for, rather than leaving two identical ids to be told apart by a value
-    Slack never looks at. Both reach the same handler; the value still carries
-    the job, the lane and the activity.
-    """
-    action_id = "trk_start_setup" if activity == "setup" else "trk_start_production"
+
+def _start_button(text, task_id, phase, activity, style=None):
+    """A button that opens a piece of work and starts timing it."""
+    action_id = START_ACTION_IDS.get(
+        (phase, activity),
+        "trk_start_setup" if activity == "setup" else "trk_start_production",
+    )
     return _button(text, action_id, work_value(task_id, phase, activity), style=style)
 
 
@@ -462,17 +618,23 @@ def delete_still_applies(task):
     Whether this job could still be one that should never have been entered.
 
     Delete is that correction, and it is only honest while nothing has been
-    made yet. "Setup" alone does not say so: the BORDER's setup is reached with
-    the field worked and finished behind it, and offering to take the job off
-    the list there put a red button beside several hours of real labour.
+    made yet. "Setup" alone does not say so: a BORDER's setup can be reached
+    with the field worked and finished behind it, and offering to take the job
+    off the list there put a red button beside several hours of real labour.
 
-    So the test is the state of the job, not the name of the activity - the job
-    is still on its first lane, and no lane has produced anything.
+    So the test is what the job has actually produced, not which lane it
+    happens to sit on. Naming the field as "the first lane" was true only while
+    every job began with one; a border-only job starts on its border, and the
+    old test hid Delete from it entirely - leaving a maker who entered the
+    wrong job unable to take it off their list at all.
+
+    Nothing produced anywhere, and no lane declared finished: that is a job
+    that could still be one that should never have been entered.
     """
-    if task["current_phase"] != "field_sheeting":
-        return False
     for phase in ("field_sheeting", "border_sheeting", "packing"):
         if work_elapsed(task, phase, "production"):
+            return False
+        if lane_state(task, phase) == "complete":
             return False
     return True
 
@@ -509,7 +671,8 @@ def card_actions(task):
 
     if here and here["activity"] == "setup":
         # Setting up. The forward move is the sheeting itself, and this is the
-        # moment the jig becomes known, so both are on the card.
+        # moment the jig becomes known, so both are on the card. Everything
+        # else on the job is reachable from the row below.
         buttons.append(_start_button(
             "Start " + work_name(here["phase"], "production").lower(),
             task_id, here["phase"], "production", style="primary",
@@ -522,23 +685,14 @@ def card_actions(task):
         return buttons
 
     if here:
-        # Working. Pause, measure cutting alongside it, move to other work, or
-        # say the lane is finished.
+        # Working. Pause, measure cutting alongside it, or say the lane is
+        # finished. Moving to other work is the row below, not a form.
         if cutting:
             buttons.append(_button("Stop cutting", "trk_stop_cutting", work_value(task_id),
                                    style="primary"))
         buttons.append(_button("Pause", "trk_stop_task", work_value(task_id)))
         if not cutting and here["phase"] != "packing" and here["activity"] == "production":
             buttons.append(_button("Start cutting", "trk_start_cutting", work_value(task_id)))
-        # Packing worked as an interruption: the way back to the waiting
-        # sheeting is one press, because that is the common one.
-        if here["phase"] != cursor and cursor != "completed" and lane_open(task, cursor):
-            buttons.append(_start_button(
-                "Back to " + work_name(cursor, "production").lower(),
-                task_id, cursor, "production", style="primary",
-            ))
-        if switch_destinations(task):
-            buttons.append(_button("Switch work", "trk_switch_work", work_value(task_id)))
         buttons.append(_jig_button(task))
         if here["phase"] == cursor:
             finish = _finish_button(task)
@@ -578,8 +732,6 @@ def card_actions(task):
                     "Start " + work_name(resume[0], "production").lower(),
                     task_id, resume[0], "production",
                 ))
-    if switch_destinations(task):
-        buttons.append(_button("Switch work", "trk_switch_work", work_value(task_id)))
     buttons.append(_jig_button(task))
     buttons.append(_button("Edit details", "trk_edit_task", work_value(task_id)))
     # A job entered by mistake is as likely to be spotted on the paused card as
@@ -756,16 +908,16 @@ def due_date_display(task):
 # ---------------------------------------------------------------------------
 # Difficulty
 # ---------------------------------------------------------------------------
-# A number from 1 to 10, and nothing else. That is what it has always been -
-# every difficulty ever recorded is a whole number in that range - but the box
-# never said so, so a maker who answered it in words was told only that they
-# had used too many characters. The label carries the range now, and a value
-# that is not one is refused in those words.
+# A whole number, up to two digits. Every difficulty ever recorded is one, and
+# the box has always taken two characters - but it never said so, so a maker
+# who answered in words was told only that they had used too many characters.
+# It is deliberately NOT capped at ten: nobody has given us a maximum, and the
+# recorded range only tells us what has been typed so far, not what is allowed.
 
-DIFFICULTY_LABEL_FIELD = "Field difficulty (1-10)"
-DIFFICULTY_LABEL_BORDER = "Border difficulty (1-10)"
-DIFFICULTY_HINT = "e.g. 3"
-DIFFICULTY_ERROR = "Give the difficulty as a whole number from 1 to 10, for example 3."
+DIFFICULTY_LABEL_FIELD = "Field difficulty"
+DIFFICULTY_LABEL_BORDER = "Border difficulty"
+DIFFICULTY_HINT = "e.g. 12"
+DIFFICULTY_ERROR = "Give the difficulty as a whole number, up to two digits - for example 12."
 
 
 def read_difficulty(typed):
@@ -779,8 +931,10 @@ def read_difficulty(typed):
         return None, None
     if not all(character in "0123456789" for character in raw):
         return None, DIFFICULTY_ERROR
+    if len(raw) > 2:
+        return None, DIFFICULTY_ERROR
     value = int(raw)
-    if value < 1 or value > 10:
+    if value < 1:
         return None, DIFFICULTY_ERROR
     return str(value), None
 
@@ -884,7 +1038,7 @@ def job_summary_blocks(task, finished_by, general_notes, issues):
     if task.get("border_jigs"):
         facts.append("Border jig " + task["border_jigs"])
 
-    return [
+    blocks = [
         {
             "type": "header",
             "text": {"type": "plain_text", "text": header_text(task)},
@@ -898,12 +1052,21 @@ def job_summary_blocks(task, finished_by, general_notes, issues):
             "type": "section",
             "text": {"type": "mrkdwn", "text": "\n".join(_time_lines(task))},
         },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn",
-                     "text": "*Notes*\n" + general_notes + "\n\n*Anything go wrong?*\n" + issues},
-        },
     ]
+    # Notes and problems appear when there are some. A finished job that went
+    # fine used to end with "Notes / None / Anything go wrong? / None", which
+    # is four lines saying nothing and made every completion look like a form
+    # nobody filled in. The channel is for operational state; the full record
+    # is in the database either way.
+    written = (general_notes or "").strip()
+    if written and written.lower() != "none":
+        blocks.append({"type": "section",
+                       "text": {"type": "mrkdwn", "text": "*Notes*\n" + written}})
+    wrong = (issues or "").strip()
+    if wrong and wrong.lower() != "none":
+        blocks.append({"type": "section",
+                       "text": {"type": "mrkdwn", "text": "*Anything go wrong?*\n" + wrong}})
+    return blocks
 
 def border_route(task):
     """
@@ -914,8 +1077,8 @@ def border_route(task):
     Resume packing is the forward move and the border is reached through Switch
     work. Saying "start the border" there names a button that is not there.
     """
-    for button in card_actions(task):
-        if button.get("action_id") not in ("trk_start_setup", "trk_start_production"):
+    for button in card_actions(task) + other_work_buttons(task):
+        if not (button.get("action_id") or "").startswith("trk_start_"):
             continue
         if "border_sheeting" in (button.get("value") or ""):
             return "Start the border when you are ready."
@@ -953,6 +1116,29 @@ def job_card(task, note=None):
             "type": "actions",
             "block_id": "task_actions_" + str(task_id),
             "elements": actions,
+        })
+    # The rest of the job, as its own row. A maker is not walking a wizard:
+    # while the job is unfinished they can move between whatever work it
+    # actually contains, and the card says so rather than hiding it behind a
+    # form. Its own block because an action_id is unique per block, and
+    # because "what else is on this job" is a different question from "what
+    # can I do with what I am holding".
+    offered = {b.get("value") for b in actions if (b.get("action_id") or "").startswith("trk_start_")}
+    elsewhere = other_work_buttons(task, offered)
+    describe_border = border_details_button(task)
+    if describe_border:
+        elsewhere.append(describe_border)
+    if elsewhere:
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn",
+                          "text": "*Other work on this job* - moving pauses what you are on "
+                                  "and finishes nothing."}],
+        })
+        blocks.append({
+            "type": "actions",
+            "block_id": "task_elsewhere_" + str(task_id),
+            "elements": elsewhere,
         })
     times = _time_lines(task)
     if times:
@@ -1445,14 +1631,19 @@ def handle_step_1(ack,body,client,):
             {
                 "type": "section",
                 "text": {"type": "mrkdwn",
-                         "text": "*What is on the diagram?*\nFill in the field, the border, or "
-                                 "both. Leave a part blank if the diagram does not have it."}
+                         "text": "*What is on the diagram?*\nFill in the Field, the Border, or "
+                                 "both."}
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*Field*"}
             },
             {
                 "type": "input",
                 "block_id": "design",
                 "optional": True,
-                "label": {"type": "plain_text", "text": "Field design"},
+                "label": {"type": "plain_text", "text": "Design"},
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "val",
@@ -1463,7 +1654,7 @@ def handle_step_1(ack,body,client,):
                 "type": "input",
                 "block_id": "diff",
                 "optional": True,
-                "label": {"type": "plain_text", "text": DIFFICULTY_LABEL_FIELD},
+                "label": {"type": "plain_text", "text": "Difficulty"},
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "difficulty",
@@ -1471,11 +1662,16 @@ def handle_step_1(ack,body,client,):
                     "placeholder": {"type": "plain_text", "text": DIFFICULTY_HINT},
                 },
             },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*Border*"}
+            },
             {
                 "type": "input",
                 "block_id": "border_design",
                 "optional": True,
-                "label": {"type": "plain_text", "text": "Border design"},
+                "label": {"type": "plain_text", "text": "Design"},
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "val",
@@ -1486,7 +1682,7 @@ def handle_step_1(ack,body,client,):
                 "type": "input",
                 "block_id": "border_diff",
                 "optional": True,
-                "label": {"type": "plain_text", "text": DIFFICULTY_LABEL_BORDER},
+                "label": {"type": "plain_text", "text": "Difficulty"},
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "difficulty",
@@ -1497,8 +1693,8 @@ def handle_step_1(ack,body,client,):
             {
                 "type": "context",
                 "elements": [{"type": "mrkdwn",
-                              "text": "Creating the job starts its setup - getting it ready to "
-                                      "work. The card goes to your DMs."}]
+                              "text": "Creating the job starts Setup and sends your work card "
+                                      "in a DM."}]
             },
         ]
     }
@@ -1548,15 +1744,27 @@ def handle_step_2(ack, body, client):
         ack(response_action="errors", errors={"border_diff": border_difficulty_error})
         return
 
-    # A difficulty for a lane the diagram does not have describes nothing.
+    # A lane is described by both of its answers or by neither. Half of one is
+    # a lane nobody can read back later: a difficulty belonging to nothing, or
+    # a design whose difficulty was simply missed on the way past.
     if difficulty and not design:
         ack(response_action="errors", errors={
             "design": "Name the field design, or clear the field difficulty."
         })
         return
+    if design and not difficulty:
+        ack(response_action="errors", errors={
+            "diff": "Give the field a difficulty, or clear the field design."
+        })
+        return
     if border_difficulty and not border_design:
         ack(response_action="errors", errors={
             "border_design": "Name the border design, or clear the border difficulty."
+        })
+        return
+    if border_design and not border_difficulty:
+        ack(response_action="errors", errors={
+            "border_diff": "Give the border a difficulty, or clear the border design."
         })
         return
 
@@ -1597,8 +1805,8 @@ def handle_step_2(ack, body, client):
     client.chat_postEphemeral(
         channel=team_channel_id,
         user=user_id,
-        text=(f"T-{task_id} is yours and the setup clock is running. The card is in your DMs "
-              f"with the bot.")
+        text=(f"T-{task_id} {task['customer_name']} has been created. "
+              f"Setup has started - I've sent your work card in a DM.")
     )
 
 # ---------------------------------------------------------------------------
@@ -1609,6 +1817,13 @@ def handle_step_2(ack, body, client):
 # Neither finishes anything. Cutting is measured inside sheeting and leaves
 # the sheeting timer running.
 
+@app.action("trk_start_field_setup")
+@app.action("trk_start_field_production")
+@app.action("trk_start_border_setup")
+@app.action("trk_start_border_production")
+@app.action("trk_start_packing_production")
+# The two ids cards used before every piece of work had its own. A card posted
+# under the older scheme is still sitting in a maker's DM and still clickable.
 @app.action("trk_start_setup")
 @app.action("trk_start_production")
 def handle_start(ack, body, client):
@@ -1930,83 +2145,12 @@ def handle_complete(ack, body, client):
 
         client.views_open(
             trigger_id=body["trigger_id"],
-            view={
-                "type": "modal",
-                "callback_id": "trk_border_modal",
-                "title": {"type": "plain_text", "text": "Border details"},
-                "submit": {"type": "plain_text", "text": "Save the border details"},
-                "close": {"type": "plain_text", "text": "Cancel"},
-                "private_metadata": metadata,
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": (f"*Field sheeting finished.* "
-                                     f"{lane_report(updated_task, 'field_sheeting')}\n"
-                                     f"Now the border - or say there isn't one.")
-                        }
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "border_design_block",
-                        "label": {"type": "plain_text", "text": "Border design"},
-                        "element": {
-                            "type": "plain_text_input",
-                            "action_id": "border_design",
-                            # Prefilled when the diagram already said what the
-                            # border is. Known at intake, worked now - and
-                            # still correctable here, which is the point of
-                            # asking again rather than assuming.
-                            "initial_value": updated_task.get("border_design") or ""
-                        }
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "border_diff_block",
-                        "label": {"type": "plain_text", "text": DIFFICULTY_LABEL_BORDER},
-                        "element": {
-                            "type": "plain_text_input",
-                            "action_id": "border_difficulty",
-                            "max_length": 2,
-                            "placeholder": {"type": "plain_text", "text": DIFFICULTY_HINT},
-                            "initial_value": updated_task.get("border_difficulty") or ""
-                        }
-                    },
-                    # Usually a millimetre size, but "template" and split sizes
-                    # are real entries too. Optional here because the border
-                    # jig is often established during the border setup, and the
-                    # card can take it then.
-                    {
-                        "type": "input",
-                        "block_id": "border_jig_block",
-                        "optional": True,
-                        "label": {"type": "plain_text", "text": "Border jig or template"},
-                        "element": {
-                            "type": "plain_text_input",
-                            "action_id": "border_jig",
-                            "placeholder": {"type": "plain_text",
-                                            "text": "e.g. 49.6 or template - leave blank if not known yet"}
-                        }
-                    },
-                    # Some jobs genuinely have no border. This is the moment the
-                    # maker knows that, so it is the moment they are asked - it
-                    # is deliberately not on the intake form, where it would be
-                    # one more thing to answer before the job can start.
-                    {
-                        "type": "actions",
-                        "block_id": "no_border_block",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": "This job has no border"},
-                                "action_id": "trk_no_border",
-                                "value": str(task_id)
-                            }
-                        ]
-                    }
-                ]
-            }
+            view=border_modal_view(
+                updated_task, metadata,
+                (f"*Field sheeting finished.* "
+                 f"{lane_report(updated_task, 'field_sheeting')}\n"
+                 f"Now the border - or say there isn't one."),
+            ),
         )
 
     elif phase == "border_sheeting":
@@ -2048,6 +2192,44 @@ def handle_complete(ack, body, client):
         )
 
 
+@app.action("trk_border_details")
+def handle_border_details(ack, body, client):
+    """
+    Describe the border now, rather than when the field is finished.
+
+    The diagram already says what the border is, so a maker who wants to go and
+    do it should not have to finish the field first to be allowed to say so.
+    Saving from here records the details and nothing else - the job's cursor
+    stays where it is, and the border becomes work the card offers.
+    """
+    ack()
+    task_id = read_work_value(body["actions"][0]["value"])[0]
+    user_id = body["user"]["id"]
+    channel_id = body["container"]["channel_id"]
+
+    task = resolve_job(client, body, task_id, user_id, channel_id)
+    if task is None:
+        return
+
+    metadata = json.dumps({
+        "task_id": task_id,
+        "dm_channel_id": channel_id,
+        "team_channel_id": task["channel_id"],
+        # The border's turn has not come, so submitting must not move the job
+        # onto it. Finishing the field still does that, exactly as before.
+        "advance_cursor": False,
+    })
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view=border_modal_view(
+            task, metadata,
+            ("*What is the border?*" + chr(10) + "Recording it here does not start "
+             "it - it just means you can go and work on it when you want to."),
+            offer_no_border=False,
+        ),
+    )
+
+
 @app.view("trk_border_modal")
 def handle_border_submission(ack, body, client):
     user_id = body["user"]["id"]
@@ -2065,8 +2247,13 @@ def handle_border_submission(ack, body, client):
     ack()
     border_jig = (vals["border_jig_block"]["border_jig"]["value"] or "").strip()
 
+    # Opened from the card before the border's turn: record what it is, and
+    # leave the job where it is. Opened by finishing the field: the border's
+    # turn has come, so the job moves onto it.
+    advance_cursor = metadata.get("advance_cursor", True)
     try:
-        database.move_to_border_phase(task_id, border_design, border_difficulty, border_jig)
+        database.move_to_border_phase(task_id, border_design, border_difficulty, border_jig,
+                                      advance_cursor=advance_cursor)
     except database.TrackerRefused as refusal:
         if refusal.reason != "another_phase_running":
             raise
