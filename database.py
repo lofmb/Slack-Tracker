@@ -418,6 +418,30 @@ def _jig_display(records):
     return " / ".join(r["value"] for r in records)
 
 
+def _activity_seconds(timing, phase, activity):
+    """
+    Setup or sheeting time for one lane.
+
+    A lane's total is these two added together, which is why the card can show
+    "Setup 1h, sheeting 5h" without either number being invented.
+    """
+    per_phase = (timing or {}).get("perPhaseActivitySeconds") or {}
+    return int(((per_phase.get(phase) or {}).get(activity) or 0))
+
+
+def _cutting_seconds(timing, phase=None):
+    """
+    Cutting time, either for one lane or for the whole job.
+
+    ALREADY INSIDE the lane time above, never added to it. A maker sheeting a
+    field who spends twelve minutes cutting worked the field for the whole
+    hour; the twelve minutes say how part of that hour was spent.
+    """
+    if phase is None:
+        return int((timing or {}).get("cuttingSeconds") or 0)
+    return int(((timing or {}).get("cuttingSecondsByPhase") or {}).get(phase) or 0)
+
+
 def _row(view, timing):
     """Build the dictionary app.py indexes into, from the API's job view."""
     job = view["job"]
@@ -426,6 +450,9 @@ def _row(view, timing):
     field = int(seconds.get("field_sheeting", 0) or 0)
     border = int(seconds.get("border_sheeting", 0) or 0)
     packing = int(seconds.get("packing", 0) or 0)
+    open_segment = view.get("openSegment") or None
+    open_contained = view.get("openContained") or None
+    last_segment = view.get("lastSegment") or None
 
     field_jig_records = _jigs_of(view, "field_sheeting")
     border_jig_records = _jigs_of(view, "border_sheeting")
@@ -454,6 +481,14 @@ def _row(view, timing):
         # The lane state is carried explicitly, and every border rendering
         # keys off it.
         "border_skipped": _phase_of(phases, "border_sheeting", "state") == "skipped",
+        # Where each lane stands: not_started, running, paused, complete, or
+        # skipped. The card reads these to decide what the maker can still do -
+        # a finished lane is not somewhere to switch to, and a lane declared
+        # absent is not either.
+        "phase_states": {
+            name: _phase_of(phases, name, "state")
+            for name in ("field_sheeting", "border_sheeting", "packing")
+        },
         "packing_begun": _packing_begun(phases, packing),
         # Packing can be worked out of turn, as an interruption of the
         # sheeting, so the cards need to know two more things: is the packing
@@ -463,6 +498,35 @@ def _row(view, timing):
         "packing_running": _phase_of(phases, "packing", "state") == "running",
         "packing_finished": _phase_of(phases, "packing", "state") == "complete",
         "packing_elapsed": packing,
+        # WHAT THE MAKER IS DOING RIGHT NOW, read from the ledger rather than
+        # worked out from lane states. Setup and sheeting share a lane, so the
+        # lane cannot say which of them is going, and during a packing
+        # interruption the lane that is accruing is not the one the job is on.
+        "working_on": (
+            {"phase": open_segment["phase"], "activity": open_segment["activity"]}
+            if open_segment
+            else None
+        ),
+        # Work being measured INSIDE that, with the main timer still running.
+        "cutting_now": (
+            {"parent_phase": open_contained["parentPhase"]} if open_contained else None
+        ),
+        # The last stretch of work, running or not — what a paused card's
+        # Resume offers. Its lane may since have been finished or declared
+        # absent, which the card checks before offering it.
+        "last_work": (
+            {"phase": last_segment["phase"], "activity": last_segment["activity"]}
+            if last_segment
+            else None
+        ),
+        # The two halves of each sheeting lane, and the cutting contained in it.
+        "field_setup_elapsed": _activity_seconds(timing, "field_sheeting", "setup"),
+        "field_production_elapsed": _activity_seconds(timing, "field_sheeting", "production"),
+        "border_setup_elapsed": _activity_seconds(timing, "border_sheeting", "setup"),
+        "border_production_elapsed": _activity_seconds(timing, "border_sheeting", "production"),
+        "field_cutting_elapsed": _cutting_seconds(timing, "field_sheeting"),
+        "border_cutting_elapsed": _cutting_seconds(timing, "border_sheeting"),
+        "cutting_elapsed": _cutting_seconds(timing),
         "general_notes": job.get("generalNotes"),
         "issues_encountered": job.get("issuesEncountered"),
         "status": _legacy_status(job, phases),
@@ -519,8 +583,19 @@ def setup_database():
     print("Tracker API ready.")
 
 
-def create_task(user_id, channel_id, customer_name, invoice_number, task_description, due_date, is_na, design, difficulty, jig_size=None):
-    """Create a job and return its number — the T-number shown on the card."""
+def create_task(user_id, channel_id, customer_name, invoice_number, task_description, due_date, is_na, design, difficulty):
+    """
+    Create a job and return its number — the T-number shown on the card.
+
+    Creating it also starts its setup timer, in the same moment. Submitting the
+    intake form is the maker taking the job on, and the setup — fetching the
+    material, reading the drawings, finding the jig — is the first real work.
+    There is nothing left for a "Start" button to start.
+
+    No jig is sent. A maker filling this form in normally does not know the jig
+    yet; finding and testing it IS the setup, so the card asks for it at the
+    point it can actually be answered.
+    """
     payload = {
         "ownerSlackUserId": user_id,
         "customerName": customer_name,
@@ -538,9 +613,6 @@ def create_task(user_id, channel_id, customer_name, invoice_number, task_descrip
         "announceChannelId": channel_id,
         "actor": f"slack:{user_id}",
     }
-    # The jig box is optional, so it is only sent when something was typed.
-    if jig_size:
-        payload["fieldJigSizeText"] = jig_size
     data = _call("POST", "/jobs", payload, operation="create_task")
     return data["job"]["jobNumber"]
 
@@ -574,63 +646,38 @@ def get_task(task_id):
     return row
 
 
-def start_task(task_id):
+def start_work(task_id, phase=None, activity="production"):
     """
-    Start — or resume — timing the phase the card is showing.
+    Move the maker onto a piece of work and start timing it.
 
-    Sent with "interrupting", which tells LMSA that if the packing timer is
-    running it should be stopped in the same moment this one starts. That is
-    how "Back to Field Sheeting" on the packing card works: one press, the
-    packing timer closes, the sheeting timer opens, and there is never an
-    instant with two timers or none. Nothing starts without this press.
-    """
-    resolved = _row_for(task_id)
-    if resolved is None:
-        return
-    view, row = resolved
-    phase = row["current_phase"]
-    if phase == "completed":
-        return
-    try:
-        _call("POST", f"/jobs/{view['job']['id']}/segments/start", {
-            "phase": phase,
-            "actor": f"slack:{row['user_id']}",
-            "interrupting": True,
-        }, operation="start_task")
-    except TrackerRefused as refusal:
-        # already_running is a second click on a card that is already going, and
-        # already_processed is the same delivery arriving twice. Both mean the
-        # timer is running, which is what the caller is about to render.
-        if refusal.reason not in ("already_running", "already_processed"):
-            raise
+    One call covers every way that happens: starting the sheeting after the
+    setup, resuming after a pause, going to pack for a while, and coming back
+    to the sheeting afterwards. Sent with "interrupting", which tells LMSA to
+    close whatever is running in the same moment this opens — so there is never
+    an instant with two timers, or none the maker did not ask for.
 
+    It never finishes anything. The work being left is paused, with everything
+    it has recorded intact.
 
-def start_packing(task_id):
-    """
-    Start the packing timer while the job is still on Field or Border work.
-
-    A maker sheeting a field may need to stop and pack for a while, then come
-    back to the sheeting. The sheeting timer is closed and the packing timer
-    opened in one step, so the times stay separate and truthful — sheeting
-    time stays sheeting time, packing time is packing time.
-
-    Returns "started", or the reason it could not, so the handler can tell
-    the maker instead of pretending. A second click on the same button, or the
-    same click delivered twice, reports "started" — the timer is running,
-    which is what the maker asked for.
+    `phase` defaults to the lane the job is on, which is what Resume wants.
+    Returns "started", or the reason it could not, so the handler can say so.
+    A second click, or the same click delivered twice, reports "started": the
+    timer is running, which is what the maker asked for.
     """
     resolved = _row_for(task_id)
     if resolved is None:
         return None
     view, row = resolved
-    if row["current_phase"] == "completed":
+    target = phase or row["current_phase"]
+    if target == "completed":
         return "job_not_open"
     try:
         _call("POST", f"/jobs/{view['job']['id']}/segments/start", {
-            "phase": "packing",
+            "phase": target,
+            "activity": activity,
             "actor": f"slack:{row['user_id']}",
             "interrupting": True,
-        }, operation="start_packing")
+        }, operation=f"start_work_{target}_{activity}")
     except TrackerRefused as refusal:
         if refusal.reason in ("already_running", "already_processed"):
             return "started"
@@ -638,29 +685,93 @@ def start_packing(task_id):
     return "started"
 
 
-def stop_task(task_id):
-    """Pause the running timer. Elapsed time is recomputed by LMSA from segments."""
+def start_packing(task_id):
+    """
+    Go and pack for a while, leaving the sheeting where it is.
+
+    Kept as its own name because a card posted by an earlier version of the
+    tracker still carries the button that calls it, and that card must keep
+    working after a deployment. New cards say "Switch work" and go through
+    start_work.
+    """
+    return start_work(task_id, "packing")
+
+
+def stop_work(task_id):
+    """
+    Pause whatever the maker is doing.
+
+    LMSA is not told which phase: the card's Pause means "stop what I am doing",
+    and only the ledger knows what that is — during a packing interruption the
+    running timer is the packing one while the job is still on its sheeting,
+    and setup and sheeting share a lane. Anything being measured inside the
+    work, such as cutting, is closed with it.
+
+    Elapsed time is recomputed by LMSA from the segments.
+    """
     resolved = _row_for(task_id)
     if resolved is None:
         return
     view, row = resolved
-    phase = row["current_phase"]
-    if phase == "completed":
+    if row["current_phase"] == "completed":
         return
-    # When packing is being worked as an interruption, the running timer is
-    # the packing one, whatever phase the job itself is on — so that is the
-    # one Stop stops.
-    if row.get("packing_running") and phase != "packing":
-        phase = "packing"
     try:
         _call("POST", f"/jobs/{view['job']['id']}/segments/stop", {
-            "phase": phase,
             "actor": f"slack:{row['user_id']}",
             "stopReason": "worker_action",
-        }, operation="stop_task")
+        }, operation="stop_work")
     except TrackerRefused as refusal:
         if refusal.reason not in ("not_running", "already_processed"):
             raise
+
+
+def start_cutting(task_id):
+    """
+    Start measuring cutting, WITHOUT stopping the sheeting.
+
+    The maker goes downstairs, cuts tiles, comes back. They were working the
+    field the whole time, so the field timer keeps running and this records how
+    part of that time was spent. LMSA refuses it when there is no sheeting
+    running to be inside.
+
+    Returns "started" or the reason it could not.
+    """
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return None
+    view, row = resolved
+    try:
+        _call("POST", f"/jobs/{view['job']['id']}/contained/start", {
+            "activity": "cutting",
+            "actor": f"slack:{row['user_id']}",
+        }, operation="start_cutting")
+    except TrackerRefused as refusal:
+        if refusal.reason in ("already_cutting", "already_processed"):
+            return "started"
+        return refusal.reason
+    return "started"
+
+
+def stop_cutting(task_id):
+    """
+    Stop measuring the cutting. The sheeting timer carries on, because the
+    maker never stopped sheeting — they went and cut some tiles for a while.
+
+    Returns "stopped" or the reason it could not.
+    """
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return None
+    view, row = resolved
+    try:
+        _call("POST", f"/jobs/{view['job']['id']}/contained/stop", {
+            "actor": f"slack:{row['user_id']}",
+        }, operation="stop_cutting")
+    except TrackerRefused as refusal:
+        if refusal.reason in ("not_cutting", "already_processed"):
+            return "stopped"
+        return refusal.reason
+    return "stopped"
 
 
 def complete_task(task_id):
@@ -1021,11 +1132,21 @@ def format_elapsed(seconds):
 
 
 def get_completed_tasks():
-    """Completed jobs, oldest first, for the Excel export."""
+    """
+    Completed jobs, oldest first, for the Excel export.
+
+    The whole entry is passed through, jigs included. Dropping them here left
+    every jig column in the export empty while the same jigs showed correctly
+    on the card, which reads as jobs that never had one.
+    """
     data = _call("GET", "/jobs/completed")
     rows = []
     for entry in (data or {}).get("jobs", []):
-        rows.append(_row({"job": entry["job"], "phases": entry.get("phases") or []}, entry.get("timing")))
+        rows.append(_row({
+            "job": entry["job"],
+            "phases": entry.get("phases") or [],
+            "jigs": entry.get("jigs") or [],
+        }, entry.get("timing")))
     return rows
 
 

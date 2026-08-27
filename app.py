@@ -38,8 +38,8 @@ def packing_modal_view(metadata, summary_text):
     return {
         "type": "modal",
         "callback_id": "trk_packing_modal",
-        "title": {"type": "plain_text", "text": "Packing (Phase 3)"},
-        "submit": {"type": "plain_text", "text": "Start Packing Phase"},
+        "title": {"type": "plain_text", "text": "Packing"},
+        "submit": {"type": "plain_text", "text": "Go to the packing"},
         "close": {"type": "plain_text", "text": "Cancel"},
         "private_metadata": metadata,
         "blocks": [
@@ -63,6 +63,736 @@ def border_time_display(task):
     if task.get("border_skipped"):
         return "No Border"
     return database.format_elapsed(task["border_elapsed"] or 0)
+
+
+# ---------------------------------------------------------------------------
+# The card the maker works from
+# ---------------------------------------------------------------------------
+#
+# ONE card, built from what the job actually is, so every route through the
+# workflow shows the same thing and a change to it cannot land on one path and
+# miss another. It answers four questions, in the order a maker asks them:
+#
+#     Which job is this?          the header
+#     What am I working on?       the status line
+#     How long have I recorded?   the times
+#     What can I do next?         the buttons
+#
+# Everything else the job knows is grouped underneath, because giving every
+# field the same weight is what turns a card into a wall of text.
+
+# What each piece of work is called wherever the maker sees it. Setup and
+# sheeting share a lane, so a name has to say both which lane and which work.
+WORK_NAMES = {
+    ("field_sheeting", "setup"): "Field setup",
+    ("field_sheeting", "production"): "Field sheeting",
+    ("border_sheeting", "setup"): "Border setup",
+    ("border_sheeting", "production"): "Border sheeting",
+    ("packing", "production"): "Packing",
+}
+
+# What each move to that work is worth saying about it, on the Switch work
+# form where the maker is choosing between them.
+WORK_BLURBS = {
+    ("field_sheeting", "setup"): "Getting the field ready - material, drawings, jig",
+    ("field_sheeting", "production"): "Sheeting the field",
+    ("border_sheeting", "setup"): "Getting the border ready",
+    ("border_sheeting", "production"): "Sheeting the border",
+    ("packing", "production"): "Packing this job; the sheeting waits, unfinished",
+}
+
+# The lane itself, as opposed to a piece of work inside it. Used where a figure
+# covers the whole lane - its setup and its sheeting together - so that number
+# is never labelled with the name of one of its halves.
+LANE_NAMES = {
+    "field_sheeting": "Field",
+    "border_sheeting": "Border",
+    "packing": "Packing",
+}
+
+# The press that says a lane is genuinely done.
+FINISH_LABELS = {
+    "field_sheeting": "Field sheeting finished",
+    "border_sheeting": "Border finished",
+    "packing": "Packing finished",
+}
+
+# What happens next once it is. A lane can be finished while the form that
+# follows it is still owed - a cancelled modal, or a "no border" taken back -
+# and then the button is not a finish at all, it is the way back to that form.
+NEXT_STEP_LABELS = {
+    "field_sheeting": "Enter border details",
+    "border_sheeting": "Go to packing",
+    "packing": "Finish the job",
+}
+
+
+def work_name(phase, activity):
+    return WORK_NAMES.get((phase, activity), "Work")
+
+
+def work_value(task_id, phase=None, activity=None):
+    """
+    What a button carries.
+
+    A bare number still means "this job", which is what Edit, Delete and the
+    rest need and what every card posted by an earlier version of the tracker
+    sends. A button that moves the maker onto a particular piece of work names
+    it, so the handler never has to guess which one was meant.
+    """
+    if phase is None:
+        return str(task_id)
+    return f"{task_id}|{phase}|{activity}"
+
+
+def read_work_value(raw):
+    """Read a button's value back. Returns (task_id, phase, activity)."""
+    parts = str(raw).split("|")
+    task_id = int(parts[0])
+    if len(parts) == 3:
+        return task_id, parts[1], parts[2]
+    return task_id, None, None
+
+
+def lane_state(task, phase):
+    return (task.get("phase_states") or {}).get(phase)
+
+
+def lane_open(task, phase):
+    """A lane still to be worked: not finished, and not declared absent."""
+    return lane_state(task, phase) not in ("complete", "skipped")
+
+
+def work_elapsed(task, phase, activity):
+    """
+    Seconds recorded against one piece of work.
+
+    Packing has no setup, so asking for its setup is nought - not the packing
+    total over again. Anything that adds a lane's two activities together
+    depends on that.
+    """
+    if phase == "packing":
+        return (task["packing_elapsed"] or 0) if activity == "production" else 0
+    lane = "field" if phase == "field_sheeting" else "border"
+    return task[f"{lane}_{activity}_elapsed"] or 0
+
+
+def switch_destinations(task):
+    """
+    The work the maker may move to from here.
+
+    Derived from the job rather than listed per card. A lane that is finished,
+    or that the maker declared did not happen, is not somewhere to go; a border
+    nobody has described yet has not been reached; and packing has no setup.
+    Whatever survives is offered, and the maker's press is what chooses.
+    """
+    here = task.get("working_on") or {}
+    out = []
+    for phase, activity in (
+        ("field_sheeting", "setup"),
+        ("field_sheeting", "production"),
+        ("border_sheeting", "setup"),
+        ("border_sheeting", "production"),
+        ("packing", "production"),
+    ):
+        if phase == here.get("phase") and activity == here.get("activity"):
+            continue
+        if not lane_open(task, phase):
+            continue
+        # The border modal is where a border is described. Until it has been,
+        # there is no border to go and work on.
+        if phase == "border_sheeting" and not task.get("border_design"):
+            continue
+        out.append({
+            "phase": phase,
+            "activity": activity,
+            "label": work_name(phase, activity),
+            "blurb": WORK_BLURBS[(phase, activity)],
+        })
+    return out
+
+
+def resume_target(task):
+    """
+    What Resume means on a paused card: the last thing the maker was doing.
+
+    Read from the ledger rather than assumed, because the last thing they were
+    doing is not always the lane the job is on - a maker who stopped packing
+    mid-field is paused on the packing. If that work has since been finished or
+    declared absent, the lane the job is on is the honest fallback.
+    """
+    last = task.get("last_work")
+    if last and lane_open(task, last["phase"]):
+        return last["phase"], last["activity"]
+    cursor = task["current_phase"]
+    if cursor != "completed" and lane_open(task, cursor):
+        return cursor, "production"
+    return None
+
+
+# Slack's ceiling for a header block's text.
+HEADER_LIMIT = 150
+
+
+def header_text(task, suffix=""):
+    """
+    "T-12  Customer Name", trimmed to something Slack will accept.
+
+    The job number and any suffix are never what gets cut: they are how a maker
+    finds the card. A name too long to fit is shortened here and shown in full
+    in the fields below, so nothing is lost.
+    """
+    prefix = "T-" + str(task["task_id"]) + "  "
+    room = HEADER_LIMIT - len(prefix) - len(suffix)
+    name = task["customer_name"] or ""
+    if len(name) > room:
+        name = name[: max(room - 1, 0)].rstrip() + "…"
+    return prefix + name + suffix
+
+
+def customer_was_trimmed(task):
+    return not header_text(task).endswith(task["customer_name"] or "")
+
+
+def _button(text, action_id, value, style=None, confirm=None):
+    button = {
+        "type": "button",
+        "text": {"type": "plain_text", "text": text},
+        "action_id": action_id,
+        "value": value,
+    }
+    if style:
+        button["style"] = style
+    if confirm:
+        button["confirm"] = confirm
+    return button
+
+
+def _jig_button(task):
+    """
+    Set jig / Add jig.
+
+    Same action either way - the record is always appended, never overwritten,
+    because a jig that was genuinely used stays used. The wording changes
+    because "Add" reads as a second one, and the first time there is nothing to
+    add to.
+    """
+    has_jig = bool(task.get("field_jigs") or task.get("border_jigs"))
+    return _button(
+        "Add jig" if has_jig else "Set jig / template",
+        "trk_add_jig",
+        work_value(task["task_id"]),
+    )
+
+
+def _finish_button(task):
+    """
+    The one press that says a lane is done - or, once it is, the way on to the
+    form that follows it.
+
+    Nothing else on the card finishes anything, and this is deliberately not
+    offered until the lane has some sheeting time on it: straight out of setup
+    the forward move is to START the sheeting, not to declare it over.
+    """
+    cursor = task["current_phase"]
+    if cursor == "completed":
+        return None
+    if lane_state(task, cursor) == "complete":
+        # Finished already; what is owed is the form that comes next.
+        return _button(NEXT_STEP_LABELS[cursor], "trk_complete_task", work_value(task["task_id"]),
+                       style="primary")
+    if not lane_open(task, cursor):
+        return None
+    here = task.get("working_on") or {}
+    on_it_now = here.get("phase") == cursor and here.get("activity") == "production"
+    # Straight out of setup there is nothing to declare finished, so the
+    # forward move is to START the sheeting. Once it has started - this
+    # instant, not once a minute has accrued - finishing it is a real choice.
+    if not on_it_now and work_elapsed(task, cursor, "production") <= 0:
+        return None
+    label = FINISH_LABELS[cursor]
+    return _button(
+        label,
+        "trk_complete_task",
+        work_value(task["task_id"]),
+        confirm={
+            "title": {"type": "plain_text", "text": label + "?"},
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    "This closes the *" + work_name(cursor, "production").lower() +
+                    "* for good and moves the job on.\n\n"
+                    "Still something to do on it? Use *Switch work* instead - that "
+                    "leaves it unfinished and you can come back."
+                ),
+            },
+            "confirm": {"type": "plain_text", "text": "Yes, it is finished"},
+            "deny": {"type": "plain_text", "text": "Not yet"},
+        },
+    )
+
+
+def _delete_button(task_id):
+    return _button(
+        "Delete job",
+        "trk_delete_task",
+        work_value(task_id),
+        style="danger",
+        confirm={
+            "title": {"type": "plain_text", "text": "Delete this job?"},
+            "text": {
+                "type": "plain_text",
+                "text": (
+                    "It comes off your list and you can start another. Any time already "
+                    "recorded stays on the record, but you cannot pick this job back up "
+                    "from here - a supervisor would have to."
+                ),
+            },
+            "confirm": {"type": "plain_text", "text": "Yes, take it off my list"},
+            "deny": {"type": "plain_text", "text": "Keep it"},
+        },
+    )
+
+
+def card_actions(task):
+    """The buttons, chosen by what the maker is actually able to do next."""
+    task_id = task["task_id"]
+    here = task.get("working_on")
+    cutting = task.get("cutting_now")
+    cursor = task["current_phase"]
+    buttons = []
+
+    if here and here["activity"] == "setup":
+        # Setting up. The forward move is the sheeting itself, and this is the
+        # moment the jig becomes known, so both are on the card.
+        buttons.append(_button(
+            "Start " + work_name(here["phase"], "production").lower(),
+            "trk_start_task",
+            work_value(task_id, here["phase"], "production"),
+            style="primary",
+        ))
+        buttons.append(_button("Pause setup", "trk_stop_task", work_value(task_id)))
+        buttons.append(_jig_button(task))
+        buttons.append(_button("Edit details", "trk_edit_task", work_value(task_id)))
+        # The one place Delete is offered: a job logged by mistake is spotted
+        # here, before any of it has been made. Past that, a job that has to
+        # come off the list is a supervisor's correction, not a button.
+        buttons.append(_delete_button(task_id))
+        return buttons
+
+    if here:
+        # Working. Pause, measure cutting alongside it, move to other work, or
+        # say the lane is finished.
+        if cutting:
+            buttons.append(_button("Stop cutting", "trk_stop_cutting", work_value(task_id),
+                                   style="primary"))
+        buttons.append(_button("Pause", "trk_stop_task", work_value(task_id)))
+        if not cutting and here["phase"] != "packing" and here["activity"] == "production":
+            buttons.append(_button("Start cutting", "trk_start_cutting", work_value(task_id)))
+        # Packing worked as an interruption: the way back to the waiting
+        # sheeting is one press, because that is the common one.
+        if here["phase"] != cursor and cursor != "completed" and lane_open(task, cursor):
+            buttons.append(_button(
+                "Back to " + work_name(cursor, "production").lower(),
+                "trk_start_task",
+                work_value(task_id, cursor, "production"),
+                style="primary",
+            ))
+        if switch_destinations(task):
+            buttons.append(_button("Switch work", "trk_switch_work", work_value(task_id)))
+        buttons.append(_jig_button(task))
+        if here["phase"] == cursor:
+            finish = _finish_button(task)
+            if finish:
+                buttons.append(finish)
+        return buttons
+
+    # Nothing is being timed.
+    resume = resume_target(task)
+    if resume:
+        untouched = (
+            not work_elapsed(task, resume[0], "setup")
+            and not work_elapsed(task, resume[0], "production")
+        )
+        if untouched and resume[0] != "packing":
+            # A sheeting lane nobody has started yet. Setup comes first, the
+            # same way it does on the field, and the sheeting is right beside
+            # it for a job that needs no preparing.
+            buttons.append(_button(
+                "Start " + work_name(resume[0], "setup").lower(),
+                "trk_start_task",
+                work_value(task_id, resume[0], "setup"),
+                style="primary",
+            ))
+            buttons.append(_button(
+                "Start " + work_name(resume[0], "production").lower(),
+                "trk_start_task",
+                work_value(task_id, resume[0], "production"),
+            ))
+        else:
+            # "Resume" only where there is something to resume; a lane with no
+            # time on it is being started, whatever the ledger last recorded.
+            verb = "Resume" if work_elapsed(task, resume[0], resume[1]) else "Start"
+            buttons.append(_button(
+                verb + " " + work_name(*resume).lower(),
+                "trk_start_task",
+                work_value(task_id, resume[0], resume[1]),
+                style="primary",
+            ))
+            if resume[1] == "setup":
+                buttons.append(_button(
+                    "Start " + work_name(resume[0], "production").lower(),
+                    "trk_start_task",
+                    work_value(task_id, resume[0], "production"),
+                ))
+    if switch_destinations(task):
+        buttons.append(_button("Switch work", "trk_switch_work", work_value(task_id)))
+    buttons.append(_jig_button(task))
+    buttons.append(_button("Edit details", "trk_edit_task", work_value(task_id)))
+    finish = _finish_button(task)
+    if finish:
+        buttons.append(finish)
+    # A job marked "no border" can still turn out to need one. The way back
+    # stays open until packing is finished for good, and lives on the paused
+    # card because the correction is refused while a timer runs - a button that
+    # always refuses is worse than no button.
+    if cursor == "packing" and task.get("border_skipped") and not task.get("packing_finished"):
+        buttons.append(_button("Border after all", "trk_undo_no_border", work_value(task_id)))
+    return buttons
+
+
+def _status_lines(task):
+    """
+    What the maker is doing, said plainly and first.
+
+    A working card names the work and how long it has been going. A paused card
+    says nothing is being timed, and what it was. During a packing interruption
+    it also says what is waiting, because "the field is paused, not finished"
+    is the fact a maker most needs and the one a status word cannot carry.
+    """
+    here = task.get("working_on")
+    cursor = task["current_phase"]
+    if not here:
+        last = task.get("last_work")
+        lines = ["*Paused - nothing is being timed*"]
+        if last:
+            lines.append(
+                "Last on " + work_name(last["phase"], last["activity"]).lower() + ", "
+                + database.format_elapsed(work_elapsed(task, last["phase"], last["activity"]))
+                + " recorded."
+            )
+        return lines
+
+    name = work_name(here["phase"], here["activity"])
+    lines = ["*Working on: " + name + "*"]
+    if here["activity"] == "setup":
+        lines.append("_Getting the job ready to sheet - material, drawings, and the jig._")
+    if here["phase"] != cursor and cursor != "completed":
+        waiting = work_name(cursor, "production").lower()
+        lines.append(
+            "_" + waiting.capitalize() + " is paused while you do this. Its time is safe, "
+            "nothing about it is finished, and the job is still on it._"
+        )
+    lines.append(
+        name + " so far: *"
+        + database.format_elapsed(work_elapsed(task, here["phase"], here["activity"])) + "*"
+    )
+    cutting = task.get("cutting_now")
+    if cutting:
+        inside = work_name(cutting["parent_phase"], "production").lower()
+        lines.append(
+            "*Cutting now* - the " + inside + " timer is still running, so this time counts "
+            "as " + inside + " either way."
+        )
+    return lines
+
+
+def _fields(task):
+    """
+    The job itself. Two columns, so it reads as a small label rather than
+    another paragraph, and only the things that have an answer.
+    """
+    pairs = []
+    # Only when the header could not hold it - otherwise it would be on the
+    # card twice.
+    if customer_was_trimmed(task):
+        pairs.append(("Customer", task["customer_name"]))
+    pairs += [("Job", task["task_description"]), ("Invoice", task["invoice_number"])]
+    if task.get("field_design"):
+        pairs.append(("Field design", task["field_design"]))
+    if task.get("difficulty"):
+        pairs.append(("Field difficulty", task["difficulty"]))
+    if task.get("border_design"):
+        pairs.append(("Border design", task["border_design"]))
+    if task.get("border_difficulty"):
+        pairs.append(("Border difficulty", task["border_difficulty"]))
+    if task.get("field_jigs"):
+        pairs.append(("Field jig", task["field_jigs"]))
+    if task.get("border_jigs"):
+        pairs.append(("Border jig", task["border_jigs"]))
+    pairs.append(("Due", task["due_date"] or "N/A"))
+    # Slack renders at most ten fields in a section.
+    return [{"type": "mrkdwn", "text": "*" + label + "*\n" + str(value)}
+            for label, value in pairs[:10]]
+
+
+def _time_lines(task, total_label="Total so far"):
+    """
+    What has been recorded, one fact per line.
+
+    A line appears once there is something to say on it, so an early card is
+    short and a late one is complete. Cutting is written as part of the
+    sheeting line it happened inside, never as a line of its own: it is time
+    already counted, and a separate entry would read as time on top.
+    """
+    here = task.get("working_on") or {}
+    rows = []
+
+    def add(phase, activity):
+        seconds = work_elapsed(task, phase, activity)
+        current = here.get("phase") == phase and here.get("activity") == activity
+        if not seconds and not current:
+            return
+        line = work_name(phase, activity) + ": " + database.format_elapsed(seconds)
+        if activity == "production" and phase != "packing":
+            lane = "field" if phase == "field_sheeting" else "border"
+            cutting = task.get(lane + "_cutting_elapsed") or 0
+            if cutting:
+                line += "  _(includes " + database.format_elapsed(cutting) + " cutting)_"
+        rows.append(line)
+
+    add("field_sheeting", "setup")
+    add("field_sheeting", "production")
+    if task.get("border_skipped"):
+        rows.append("Border: No Border")
+    else:
+        add("border_sheeting", "setup")
+        add("border_sheeting", "production")
+    add("packing", "production")
+
+    # Nothing worked yet: the status line has already said what the maker is on
+    # and how long for, and repeating it under a heading is three noughts and no
+    # information.
+    if not rows or not task["total_elapsed"]:
+        return []
+    return ["*Time recorded*"] + rows + [
+        total_label + ": *" + database.format_elapsed(task["total_elapsed"]) + "*"
+    ]
+
+
+def lane_report(task, phase):
+    """
+    One line saying how long a lane took and how that time was made up.
+
+    Used wherever a lane is announced as finished - the team channel, the form
+    that follows it, the closing summary - so those three can never disagree
+    about the same lane, and so "5h 12m" is never quietly a different 5h 12m in
+    two places.
+    """
+    if phase == "border_sheeting" and task.get("border_skipped"):
+        return "Border: no border on this job"
+    setup = work_elapsed(task, phase, "setup")
+    production = work_elapsed(task, phase, "production")
+    line = LANE_NAMES[phase] + ": " + database.format_elapsed(setup + production)
+    parts = []
+    if setup:
+        parts.append(database.format_elapsed(setup) + " setup")
+    if phase != "packing":
+        lane = "field" if phase == "field_sheeting" else "border"
+        cutting = task.get(lane + "_cutting_elapsed") or 0
+        if cutting:
+            parts.append(database.format_elapsed(cutting) + " cutting")
+    if parts:
+        line += "  _(includes " + ", ".join(parts) + ")_"
+    return line
+
+
+def job_summary_blocks(task, finished_by, general_notes, issues):
+    """
+    The closing summary posted to the team channel.
+
+    The same time lines the card showed all along, so a maker reading it
+    recognises the job they just worked. Cutting appears inside the lane it
+    happened in and never as a line of its own: it is time already counted, and
+    a separate entry would read as time on top of the job.
+    """
+    facts = [f"Invoice {task['invoice_number']}", task["task_description"]]
+    if task.get("field_jigs"):
+        facts.append("Field jig " + task["field_jigs"])
+    if task.get("border_jigs"):
+        facts.append("Border jig " + task["border_jigs"])
+
+    return [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": header_text(task)},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": "*Finished by <@" + finished_by + ">*\n" + "  ·  ".join(facts)},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "\n".join(_time_lines(task, total_label="Total"))},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": "*Notes*\n" + general_notes + "\n\n*Anything go wrong?*\n" + issues},
+        },
+    ]
+
+def job_card(task, note=None):
+    """
+    The whole card. Returns (fallback text, blocks).
+
+    `note` is a single line put at the top when something just happened that
+    the card alone would not explain - a jig recorded, a border put back.
+    """
+    task_id = task["task_id"]
+    blocks = [{
+        "type": "header",
+        "text": {"type": "plain_text", "text": header_text(task)},
+    }]
+    if note:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": note}})
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "\n".join(_status_lines(task))},
+    })
+    blocks.append({"type": "section", "fields": _fields(task)})
+    times = _time_lines(task)
+    if times:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(times)}})
+    actions = card_actions(task)
+    if actions:
+        blocks.append({
+            "type": "actions",
+            "block_id": "task_actions_" + str(task_id),
+            "elements": actions,
+        })
+    footer = "Logged by <@" + task["user_id"] + ">"
+    if any(b.get("action_id") == "trk_switch_work" for b in actions):
+        footer += "  ·  Switching work or pausing never finishes anything."
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]})
+
+    here = task.get("working_on")
+    summary = ("T-" + str(task_id) + ": " + work_name(here["phase"], here["activity"])
+               if here else "T-" + str(task_id) + ": paused")
+    return summary, blocks
+
+
+def update_card(client, task, channel_id, note=None):
+    """
+    Rewrite the job's card where it already is - or post one, if the job has
+    somehow ended up without a card to rewrite.
+    """
+    if not task.get("message_ts"):
+        repost_card(client, task, channel_id, note=note)
+        return
+    text, blocks = job_card(task, note=note)
+    client.chat_update(
+        channel=channel_id,
+        ts=task["message_ts"],
+        text=text,
+        blocks=blocks,
+    )
+
+
+def repost_card(client, task, channel_id, note=None):
+    """
+    Replace the card with a fresh one at the bottom of the DM.
+
+    Used at the points where the job genuinely moves on - a lane finished, the
+    border decided - because by then the old card has usually scrolled away
+    behind the modal that was just filled in, and a maker should not have to go
+    looking for the job they are working on.
+    """
+    text, blocks = job_card(task, note=note)
+    if task.get("message_ts"):
+        try:
+            client.chat_delete(channel=channel_id, ts=task["message_ts"])
+        except SlackApiError:
+            # Already gone is the outcome this wanted anyway.
+            pass
+    result = client.chat_postMessage(channel=channel_id, text=text, blocks=blocks)
+    database.update_message_ts(task["task_id"], result["channel"], result["ts"])
+    return result
+
+
+def resolve_job(client, body, task_id, user_id, channel_id):
+    """
+    The three things every button checks before it does anything: the job is
+    still there, it belongs to this maker, and it is not already finished.
+
+    Returns the job, or None having already said why.
+    """
+    task = database.get_task(task_id)
+    if task is None:
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text="That job is not there any more - it may have been deleted.",
+        )
+        return None
+    if task["user_id"] != user_id:
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text="This is <@" + task["user_id"] + ">'s job, so only they can change it.",
+        )
+        return None
+    if task["current_phase"] == "completed":
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text="T-" + str(task_id) + " is finished, so nothing more can be recorded on it.",
+        )
+        return None
+    return task
+
+
+def refusal_text(reason, task, phase=None):
+    """
+    A refusal, in workshop words: what happened, and what to do about it.
+
+    Every one of these is something a real maker can cause by pressing a
+    button, usually from a card that has gone stale in another window. So the
+    answer says what the job is actually doing now and what to press instead -
+    never a reason code, and never nothing at all.
+    """
+    lane = work_name(phase or task["current_phase"], "production").lower()
+    here = task.get("working_on")
+    doing = work_name(here["phase"], here["activity"]).lower() if here else None
+    texts = {
+        "already_running": "You are already on that, so nothing has changed.",
+        "another_phase_running": (
+            "The " + (doing or "other") + " timer is running on this job. Pause it first, "
+            "then try again."
+        ),
+        "other_activity_running": (
+            "You are on " + (doing or "other work") + " on this job. Use *Switch work* to "
+            "move across - it pauses what you are doing rather than finishing it."
+        ),
+        "phase_already_complete": (
+            "The " + lane + " is already finished on this job, so it cannot be started again."
+        ),
+        "phase_already_skipped": (
+            "This job is marked as having no border, so there is no border to work on. If that "
+            "was wrong, use *Border after all* on the packing card."
+        ),
+        "phase_has_no_setup": "Packing has no setup step - there is nothing to prepare.",
+        "cutting_needs_production_work": (
+            "Start the sheeting first. Cutting is recorded as part of the field or border work "
+            "it happens during, so there has to be some running."
+        ),
+        "not_running": "Nothing is being timed on this job at the moment.",
+        "already_cutting": "The cutting is already being timed.",
+        "not_cutting": "No cutting is being timed on this job at the moment.",
+        "job_not_open": "This job is no longer open, so nothing has been changed.",
+    }
+    return texts.get(reason, "That could not be done, so nothing has been changed.")
 
 
 @app.middleware
@@ -247,11 +977,20 @@ def handle_export(body, client):
         "Field Design",
         "Field Difficulty",
         "Field Jig Size(s)",
+        # The lane total, then how it was made up. Setup and sheeting ADD UP to
+        # the lane total; cutting is time already inside the sheeting, so it is
+        # a breakdown of it and must never be added on.
+        "Field Time",
+        "Field Setup Time",
         "Field Sheeting Time",
+        "Field Cutting (within sheeting)",
         "Border Design",
         "Border Difficulty",
         "Border Jig Size(s)",
+        "Border Time",
+        "Border Setup Time",
         "Border Sheeting Time",
+        "Border Cutting (within sheeting)",
         "Packing Time",
         "Total Time",
         "General Notes",
@@ -290,10 +1029,16 @@ def handle_export(body, client):
             # Several jigs show as one readable cell, e.g. "49.6 / 50"
             task["field_jigs"] or "-",
             database.format_elapsed(field_elapsed),
+            database.format_elapsed(task["field_setup_elapsed"] or 0),
+            database.format_elapsed(task["field_production_elapsed"] or 0),
+            database.format_elapsed(task["field_cutting_elapsed"] or 0),
             "No Border" if task.get("border_skipped") else (task["border_design"] or "-"),
             "-" if task.get("border_skipped") else (task["border_difficulty"] or "-"),
             "-" if task.get("border_skipped") else (task["border_jigs"] or "-"),
             border_time_display(task),
+            "-" if task.get("border_skipped") else database.format_elapsed(task["border_setup_elapsed"] or 0),
+            "-" if task.get("border_skipped") else database.format_elapsed(task["border_production_elapsed"] or 0),
+            "-" if task.get("border_skipped") else database.format_elapsed(task["border_cutting_elapsed"] or 0),
             database.format_elapsed(packing_elapsed),
             database.format_elapsed(total_elapsed),
             task["general_notes"] or "None",
@@ -401,16 +1146,11 @@ def handle_step_1(ack,body,client,):
             {"type": "input", "block_id": "diff", "label":
                 {"type": "plain_text", "text": "Sheeting Difficulty"},
                 "element":{"type": "plain_text_input", "action_id": "difficulty", "max_length": 2}
-                },
-            # Usually a millimetre size like 49.6, but not always a clean
-            # number - "49.4/49.8" and "template" are real entries too, so the
-            # box takes whatever the maker types. Optional: not every job has
-            # the jig to hand when it is logged.
-            {"type": "input", "block_id": "jig_block", "optional": True, "label":
-                {"type": "plain_text", "text": "Jig Size (mm)"},
-                "element":{"type": "plain_text_input", "action_id": "jig_size",
-                    "placeholder": {"type": "plain_text", "text": "e.g. 49.6 or template"}}
                 }
+            # No jig question here. A maker filling this in has just been handed
+            # the job and normally does not know the jig yet - finding and
+            # testing it is the setup. The card asks at the point it can
+            # actually be answered.
         ]
     }
     )
@@ -428,7 +1168,6 @@ def handle_step_2(ack, body, client):
     # Collecting Step 2 values
     design = vals["design"]["val"]["value"]
     difficulty = vals["diff"]["difficulty"]["value"]
-    jig_size = (vals["jig_block"]["jig_size"]["value"] or "").strip()
 
     # Saving the task to the database
     task_id = database.create_task(
@@ -440,636 +1179,358 @@ def handle_step_2(ack, body, client):
         due_date=prev_data["due_date"],
         is_na=prev_data["is_na"],
         design=design,
-        difficulty=difficulty,
-        jig_size=jig_size
+        difficulty=difficulty
     )
-    
-    # Displaying due date on card
-    due_display = "N/A" if prev_data["is_na"] else prev_data["due_date"]
 
-    # The jig line only appears once there is a jig to show
-    jig_line = f"*Jig Size:*\n{jig_size}\n" if jig_size else ""
+    # Submitting this form is the handover into the workshop: the maker has the
+    # job and is already getting it ready. So the setup timer is running by the
+    # time the card appears, and there is no "Start" button - there is nothing
+    # left to start.
+    task = database.get_task(task_id)
 
     # chat_postMessage accepts a user id and resolves the DM itself, returning
     # the real D... conversation id in result["channel"]. conversations_open
     # would need the im:write scope, which the LMSA Slack app does not hold.
-    #Posting the task card to channel
-    result = client.chat_postMessage(
-        channel=user_id,
-        text=f"New Task -{task_id} created.",
-        blocks=[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"*New Task Created - Phase 1/4: Field Sheeting*\n"
-                        f"*ID:* T-{task_id}\n"
-                        f"*Customer:*\n{prev_data['customer_name']}\n"
-                        f"*Invoice:*\n{prev_data['invoice_number']}\n"
-                        f"*Task:*\n{prev_data['task_description']}\n"
-                        f"*Field Design:*\n{design}\n"
-                        f"*Difficulty:*\n{difficulty}\n"
-                        f"{jig_line}"
-                        f"*Due:*\n{due_display}\n"
-                        f"*Status:* Created"
-                    )
-                }
-            },
-            {
-                "type": "actions",
-                "block_id":f"task_actions_{task_id}",
-                "elements": [
-                    {
-                        "type":"button",
-                        "text": {"type": "plain_text", "text": "Start"},
-                        "style": "primary",
-                        "action_id": "trk_start_task",
-                        "value": str(task_id)
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Edit"},
-                        "action_id": "trk_edit_task",
-                        "value": str(task_id) 
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Delete"},
-                        "style": "danger",
-                        "action_id": "trk_delete_task",
-                        "value":str(task_id),
-                        "confirm": {
-                            "title": {"type": "plain_text", "text": "Delete Task?"},
-                            "text": {"type": "plain_text", "text": "Are you sure you want to delete this task? This cannot be undone."},
-                            "confirm": {"type": "plain_text", "text": "Yes, Delete"},
-                            "deny": {"type": "plain_text", "text": "Cancel"},
-                            "style": "danger"
-                        }
-                    }
-                ]
-            }
-        ]
-    )
-    
+    text, blocks = job_card(task)
+    result = client.chat_postMessage(channel=user_id, text=text, blocks=blocks)
+
     # Saving the timestamp
     database.update_message_ts(task_id, result["channel"], result["ts"])
-    
+
     client.chat_postEphemeral(
-        channel = team_channel_id,
+        channel=team_channel_id,
         user=user_id,
-        text=f" Task -T {task_id} created! Check your DMs with the bot to start tracking the job."
+        text=(f"T-{task_id} is yours and the setup clock is running. The card is in your DMs "
+              f"with the bot.")
     )
 
 @app.action("trk_start_task")
 def handle_start(ack, body, client):
+    """
+    Move onto a piece of work and start timing it.
+
+    One handler behind every button that does that: Start field sheeting,
+    Resume, and Back to field sheeting. The button says which work it means;
+    a button posted by an earlier version of the tracker says only which job,
+    and then the lane the job is on is what resumes.
+    """
     ack()
-    task_id = int(body["actions"][0]["value"])
+    task_id, phase, activity = read_work_value(body["actions"][0]["value"])
     user_id = body["user"]["id"]
-    task = database.get_task(task_id)
     channel_id = body["container"]["channel_id"]
-    
-    #If there is no task found
+
+    task = resolve_job(client, body, task_id, user_id, channel_id)
     if task is None:
-        client.chat_postEphemeral(
-            channel=channel_id, 
-            user=user_id,
-            text="Task not found. It may have been deleted."
-        )
         return
 
-    # Block if task belongs to someone else
-    if task["user_id"] != user_id:
+    outcome = database.start_work(task_id, phase, activity or "production")
+    if outcome != "started":
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text="You can only control your own tasks."
+            text=refusal_text(outcome, task, phase or task["current_phase"]),
         )
         return
 
-    # Block if already running
-    if task["status"] == "in_progress":
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text="This task is already running!"
-        )
-        return
+    update_card(client, database.get_task(task_id), channel_id)
 
-    database.start_task(task_id)
-    phase = task["current_phase"]
 
-    # Jig lines only appear once a jig has been recorded, so old jobs with no
-    # jig look exactly as they always did
-    field_jig_line = f"*Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
-    border_jig_line = f"*Jig Size:* {task['border_jigs']}\n" if task["border_jigs"] else ""
-
-    if phase == "field_sheeting":
-        card_text = (
-            f"*Phase 1/4: Field Sheeting - In Progress*\n"
-            f"*ID: T-{task_id}\n"
-            f"*Customer:* {task['customer_name']}\n"
-            f"*Invoice:* {task['invoice_number']}\n"
-            f"*Task:* {task['task_description']}"
-            f"*Field Design:* {task['field_design']}\n"
-            f"*Difficulty:*{task['difficulty']}\n"
-            f"{field_jig_line}"
-            f"*Due:* {task['due_date']}\n"
-            f"*Created by:* <@{task['user_id']}>\n"
-            f"*Status:* In Progress"
-        )
-    elif phase == "border_sheeting":
-        field_time = database.format_elapsed(task["field_elapsed"])
-        card_text = (
-            f"*Phase 2/4: Border Sheeting — In Progress*\n"
-            f"*ID:* T-{task_id}\n"
-            f"*Customer:* {task['customer_name']}\n"
-            f"*Invoice:* {task['invoice_number']}\n"
-            f"*Task:* {task['task_description']}\n"
-            f"*Border Design:* {task['border_design']}\n"
-            f"*Border Difficulty:* {task['border_difficulty']}\n"
-            f"{border_jig_line}"
-            f"*Created by:* <@{task['user_id']}>\n"
-            f"*Field Sheeting Time:* {field_time}\n"
-            f"*Status:* In Progress"
-        )
-        
-    elif phase == "packing":
-        field_time = database.format_elapsed(task["field_elapsed"])
-        border_time = border_time_display(task)
-        # Packing is not a jig phase itself, so its lines say which phase
-        # each jig belongs to
-        named_field_jig_line = f"*Field Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
-        named_border_jig_line = f"*Border Jig Size:* {task['border_jigs']}\n" if task["border_jigs"] else ""
-        card_text = (
-            f"*Phase 3/4: Packing - In Progress*\n"
-            f"*ID:* T-{task_id}\n"
-            f"*Customer:* {task['customer_name']}\n"
-            f"*Invoice:* {task['invoice_number']}\n"
-            f"*Task:* {task['task_description']}\n"
-            f"{named_field_jig_line}"
-            f"{named_border_jig_line}"
-            f"*Created by:* <@{task['user_id']}>\n"
-            f"*Field Sheeting Time:* {field_time}\n"
-            f"*Border Sheeting Time:* {border_time}\n"
-            f"*Status:* In Progress"
-        )
-    
-    else:
-        card_text = f"*Task T-{task_id} - In Progress*\n*Status:* In Progress"
-        
-    buttons = [
-        {
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Stop"},
-            "style": "danger",
-            "action_id": "trk_stop_task",
-            "value": str(task_id)
-        },
-        {
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Complete Phase"},
-            "action_id": "trk_complete_task",
-            "value": str(task_id)
-        }
-    ]
-
-    # Packing can cut in on sheeting work - a maker may need to stop and pack
-    # for a while, then come back. One press swaps the timers over; nothing
-    # starts a timer on its own. Offered until packing has been finished for
-    # good.
-    if phase in ("field_sheeting", "border_sheeting") and not task.get("packing_finished"):
-        buttons.append({
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Start Packing"},
-            "action_id": "trk_start_packing",
-            "value": str(task_id)
-        })
-
-    # Every working card offers Add Jig - from Border onwards the modal asks
-    # which phase used it, so a late Field jig has a supported route in
-    if phase in ("field_sheeting", "border_sheeting", "packing"):
-        buttons.append({
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Add Jig"},
-            "action_id": "trk_add_jig",
-            "value": str(task_id)
-        })
-
-    client.chat_update(
-        channel=channel_id,
-        ts=task["message_ts"],
-        text=f"Task T-{task_id} is now in progress.",
-        blocks=[
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": card_text}
-            },
-            {
-                "type": "actions",
-                "block_id": f"task_actions_{task_id}",
-                "elements": buttons
-            }
-        ]
-    )
-
-#Stop Task Button
 @app.action("trk_stop_task")
 def handle_stop(ack, body, client):
+    """
+    Pause. The maker is not working on this job for the moment.
+
+    Whatever was being timed stops, including any cutting that was being
+    measured inside it - there is nothing left for cutting to be inside. The
+    job keeps everything it has recorded and nothing about it is finished.
+    """
     ack()
-    task_id = int(body["actions"][0]["value"])
+    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
     user_id = body["user"]["id"]
-    task = database.get_task(task_id)
     channel_id = body["container"]["channel_id"]
 
+    task = resolve_job(client, body, task_id, user_id, channel_id)
     if task is None:
-        client.chat_postEphemeral(channel=channel_id,user=user_id, text="Task not found. It may have been deleted")
         return
-    
-    if task["user_id"] != user_id:
+
+    database.stop_work(task_id)
+    update_card(client, database.get_task(task_id), channel_id)
+
+
+@app.action("trk_start_cutting")
+def handle_start_cutting(ack, body, client):
+    """
+    The maker goes and cuts tiles for a while.
+
+    The sheeting timer keeps running, because they are still working this job -
+    they have gone downstairs to cut for it. This measures how much of that
+    time was spent cutting; it never takes time away from the sheeting.
+    """
+    ack()
+    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
+    user_id = body["user"]["id"]
+    channel_id = body["container"]["channel_id"]
+
+    task = resolve_job(client, body, task_id, user_id, channel_id)
+    if task is None:
+        return
+
+    outcome = database.start_cutting(task_id)
+    if outcome != "started":
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text="You can only control your own tasks."
+            text=refusal_text(outcome, task, task["current_phase"]),
         )
         return
 
-    database.stop_task(task_id)
-    updated_task = database.get_task(task_id)
-    phase = updated_task["current_phase"]
+    update_card(client, database.get_task(task_id), channel_id)
 
-    # Jig lines only appear once a jig has been recorded
-    field_jig_line = f"*Jig Size:* {updated_task['field_jigs']}\n" if updated_task["field_jigs"] else ""
-    border_jig_line = f"*Jig Size:* {updated_task['border_jigs']}\n" if updated_task["border_jigs"] else ""
 
-    #This pause card is baased on the current phase
+@app.action("trk_stop_cutting")
+def handle_stop_cutting(ack, body, client):
+    """Back upstairs. The sheeting was running throughout and still is."""
+    ack()
+    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
+    user_id = body["user"]["id"]
+    channel_id = body["container"]["channel_id"]
 
-    # Packing worked as an interruption shows up here too: once the job holds
-    # any packing time, the paused sheeting card says so, so the maker can see
-    # both halves of their day on one card.
-    packing_line = (
-        f"*Packing Time So Far:* {database.format_elapsed(updated_task['packing_elapsed'])}\n"
-        if updated_task["packing_elapsed"] else ""
-    )
+    task = resolve_job(client, body, task_id, user_id, channel_id)
+    if task is None:
+        return
 
-    if phase == "field_sheeting":
-        elapsed = database.format_elapsed(updated_task["field_elapsed"])
-        card_text = (
-            f"*Phase 1/4: Field Sheeting — Paused*\n"
-            f"*ID:* T-{task_id}\n"
-            f"*Customer:* {task['customer_name']}\n"
-            f"*Invoice:* {task['invoice_number']}\n"
-            f"*Task:* {task['task_description']}\n"
-            f"*Field Design:* {task['field_design']}\n"
-            f"*Difficulty:* {task['difficulty']}\n"
-            f"{field_jig_line}"
-            f"*Due:* {task['due_date']}\n"
-            f"*Created by:* <@{task['user_id']}>\n"
-            f"*Status:* Paused\n"
-            f"{packing_line}"
-            f"*Field Time So Far:* {elapsed}"
+    outcome = database.stop_cutting(task_id)
+    if outcome != "stopped":
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text=refusal_text(outcome, task, task["current_phase"]),
         )
+        return
 
-    elif phase == "border_sheeting":
-        elapsed = database.format_elapsed(updated_task["border_elapsed"])
-        card_text = (
-            f"*Phase 2/4: Border Sheeting — Paused*\n"
-            f"*ID:* T-{task_id}\n"
-            f"*Customer:* {task['customer_name']}\n"
-            f"*Invoice:* {task['invoice_number']}\n"
-            f"*Task:* {task['task_description']}\n"
-            f"*Border Design:* {task['border_design']}\n"
-            f"*Border Difficulty:* {task['border_difficulty']}\n"
-            f"{border_jig_line}"
-            f"*Created by:* <@{task['user_id']}>\n"
-            f"*Status:* Paused\n"
-            f"{packing_line}"
-            f"*Border Time So Far:* {elapsed}"
+    update_card(client, database.get_task(task_id), channel_id)
+
+
+@app.action("trk_switch_work")
+def handle_switch_work(ack, body, client):
+    """
+    Ask what the maker is moving on to.
+
+    A form rather than a button per destination, because the important part is
+    what it says before the press: this pauses what you are doing, it does not
+    finish it, and you can come back. A row of buttons cannot say that, and
+    "Start Packing" on a field card read to a maker as leaving the field
+    behind for good.
+    """
+    ack()
+    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
+    user_id = body["user"]["id"]
+    channel_id = body["container"]["channel_id"]
+
+    task = resolve_job(client, body, task_id, user_id, channel_id)
+    if task is None:
+        return
+
+    options = switch_destinations(task)
+    if not options:
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text="There is no other work to move to on T-" + str(task_id) + " just now.",
         )
-    
+        return
+
+    here = task.get("working_on")
+    if here:
+        heading = (
+            "You are on *" + work_name(here["phase"], here["activity"]) + "*. "
+            "Moving pauses it - it is *not* marked finished, everything recorded on it "
+            "stays, and you can come back to it."
+        )
     else:
-        elapsed = database.format_elapsed(updated_task["packing_elapsed"])
-        # Packing is not a jig phase itself, so its lines say which phase
-        # each jig belongs to
-        named_field_jig_line = f"*Field Jig Size:* {updated_task['field_jigs']}\n" if updated_task["field_jigs"] else ""
-        named_border_jig_line = f"*Border Jig Size:* {updated_task['border_jigs']}\n" if updated_task["border_jigs"] else ""
-        card_text = (
-            f"*Phase 3/4: Packing — Paused*\n"
-            f"*ID:* T-{task_id}\n"
-            f"*Customer:* {task['customer_name']}\n"
-            f"*Invoice:* {task['invoice_number']}\n"
-            f"*Task:* {task['task_description']}\n"
-            f"{named_field_jig_line}"
-            f"{named_border_jig_line}"
-            f"*Created by:* <@{task['user_id']}>\n"
-            f"*Status:* Paused\n"
-            f"*Packing Time So Far:* {elapsed}"
+        heading = (
+            "Nothing is being timed on T-" + str(task_id) + " at the moment. "
+            "Pick what you are starting."
         )
 
-    buttons = [
-        {
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Resume"},
-            "style": "primary",
-            "action_id": "trk_start_task",
-            "value": str(task_id)
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view={
+            "type": "modal",
+            "callback_id": "trk_switch_work_modal",
+            "title": {"type": "plain_text", "text": "Switch work"},
+            "submit": {"type": "plain_text", "text": "Move to this"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "private_metadata": json.dumps({"task_id": task_id, "channel_id": channel_id}),
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": heading}},
+                {
+                    "type": "input",
+                    "block_id": "target_block",
+                    "label": {"type": "plain_text", "text": "What are you moving to?"},
+                    "element": {
+                        "type": "radio_buttons",
+                        "action_id": "target",
+                        "options": [
+                            {
+                                "text": {"type": "plain_text", "text": option["label"]},
+                                "description": {"type": "plain_text", "text": option["blurb"]},
+                                "value": option["phase"] + "|" + option["activity"],
+                            }
+                            for option in options
+                        ],
+                    },
+                },
+            ],
         },
-        {
-            "type":"button",
-            "text":{"type": "plain_text", "text": "Edit"},
-            "action_id": "trk_edit_task",
-            "value": str(task_id)
-        },
-        {
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Complete Phase"},
-            "action_id": "trk_complete_task",
-            "value": str(task_id)
-        }
-    ]
-
-    # Same interruption route as the working card: packing can be picked up
-    # from a paused sheeting card too.
-    if phase in ("field_sheeting", "border_sheeting") and not updated_task.get("packing_finished"):
-        buttons.append({
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Start Packing"},
-            "action_id": "trk_start_packing",
-            "value": str(task_id)
-        })
-
-    # A job marked No Border can still turn out to need one, even after some
-    # packing has been done - the way back stays open until packing is
-    # finished. The button lives on the paused card, not the running one,
-    # because the correction is refused while the timer is going: stopping is
-    # what reopens it, and a button that always refuses is worse than none.
-    if phase == "packing" and updated_task.get("border_skipped") and not updated_task.get("packing_finished"):
-        buttons.append({
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Border after all"},
-            "action_id": "trk_undo_no_border",
-            "value": str(task_id)
-        })
-
-    # Every working card offers Add Jig - from Border onwards the modal asks
-    # which phase used it, so a late Field jig has a supported route in
-    if phase in ("field_sheeting", "border_sheeting", "packing"):
-        buttons.append({
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Add Jig"},
-            "action_id": "trk_add_jig",
-            "value": str(task_id)
-        })
-
-    client.chat_update(
-        channel=channel_id,
-        ts=task["message_ts"],
-        text=f"Task T-{task_id} has been paused.",
-        blocks=[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": card_text
-                }
-            },
-            {
-                "type": "actions",
-                "block_id": f"task_actions_{task_id}",
-                "elements": buttons
-            }
-        ]
     )
 
-# Start Packing button - packing as an interruption of sheeting work
+
+@app.view("trk_switch_work_modal")
+def handle_switch_work_submission(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    metadata = json.loads(body["view"]["private_metadata"])
+    task_id = metadata["task_id"]
+    channel_id = metadata["channel_id"]
+    chosen = body["view"]["state"]["values"]["target_block"]["target"]["selected_option"]["value"]
+    phase, activity = chosen.split("|")
+
+    task = resolve_job(client, body, task_id, user_id, channel_id)
+    if task is None:
+        return
+
+    # The job can move while the form sits open - the other surface finished
+    # the lane, or took a border back. Checked again here rather than trusted
+    # from when the form was built.
+    if not any(o["phase"] == phase and o["activity"] == activity
+               for o in switch_destinations(task)):
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text=("T-" + str(task_id) + " has moved on since that form was opened, so nothing "
+                  "has been changed. Go back to the job's card and carry on from there."),
+        )
+        return
+
+    outcome = database.start_work(task_id, phase, activity)
+    if outcome != "started":
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text=refusal_text(outcome, task, phase),
+        )
+        return
+
+    update_card(client, database.get_task(task_id), channel_id)
+
+
 @app.action("trk_start_packing")
 def handle_start_packing(ack, body, client):
     """
-    The maker breaks off sheeting to pack for a while.
+    Go and pack for a while, leaving the sheeting where it is.
 
-    One press: the sheeting timer stops, the packing timer starts, and the
-    card shows both. The job itself stays on its sheeting phase - packing done
-    this way is time against packing, not a decision that the sheeting is
-    over - and "Back to ..." on the new card is how the maker returns.
+    New cards say Switch work and go through the form above. This stays
+    registered because a card posted by an earlier version of the tracker is
+    still live in somebody's DM, and it should keep working rather than fall
+    silent the moment a deployment lands.
     """
     ack()
-    task_id = int(body["actions"][0]["value"])
+    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
     user_id = body["user"]["id"]
-    task = database.get_task(task_id)
     channel_id = body["container"]["channel_id"]
 
+    task = resolve_job(client, body, task_id, user_id, channel_id)
     if task is None:
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text="Task not found. It may have been deleted."
-        )
-        return
-
-    if task["user_id"] != user_id:
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text="You can only control your own tasks."
-        )
         return
 
     outcome = database.start_packing(task_id)
     if outcome != "started":
-        if outcome == "phase_already_complete":
-            text = "Packing has already been finished on this job."
-        elif outcome == "job_not_open":
-            text = "This job is no longer open."
-        else:
-            text = "Packing could not be started, so nothing has been changed."
-        client.chat_postEphemeral(channel=channel_id, user=user_id, text=text)
-        return
-
-    updated_task = database.get_task(task_id)
-    phase = updated_task["current_phase"]
-    packing_time = database.format_elapsed(updated_task["packing_elapsed"])
-
-    if phase == "packing":
-        # The job had already moved on to its packing phase on another surface,
-        # so this press is an ordinary packing start - show the normal card.
-        field_time = database.format_elapsed(updated_task["field_elapsed"])
-        border_time = border_time_display(updated_task)
-        named_field_jig_line = f"*Field Jig Size:* {updated_task['field_jigs']}\n" if updated_task["field_jigs"] else ""
-        named_border_jig_line = f"*Border Jig Size:* {updated_task['border_jigs']}\n" if updated_task["border_jigs"] else ""
-        client.chat_update(
-            channel=channel_id,
-            ts=task["message_ts"],
-            text=f"Task T-{task_id} is now in progress.",
-            blocks=[
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": (
-                            f"*Phase 3/4: Packing - In Progress*\n"
-                            f"*ID:* T-{task_id}\n"
-                            f"*Customer:* {updated_task['customer_name']}\n"
-                            f"*Invoice:* {updated_task['invoice_number']}\n"
-                            f"*Task:* {updated_task['task_description']}\n"
-                            f"{named_field_jig_line}"
-                            f"{named_border_jig_line}"
-                            f"*Created by:* <@{updated_task['user_id']}>\n"
-                            f"*Field Sheeting Time:* {field_time}\n"
-                            f"*Border Sheeting Time:* {border_time}\n"
-                            f"*Status:* In Progress"
-                        )
-                    }
-                },
-                {
-                    "type": "actions",
-                    "block_id": f"task_actions_{task_id}",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Stop"},
-                            "style": "danger",
-                            "action_id": "trk_stop_task",
-                            "value": str(task_id)
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Complete Phase"},
-                            "action_id": "trk_complete_task",
-                            "value": str(task_id)
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Add Jig"},
-                            "action_id": "trk_add_jig",
-                            "value": str(task_id)
-                        }
-                    ]
-                }
-            ]
-        )
-        return
-
-    # The card the maker packs from. The waiting sheeting phase is named, and
-    # both times sit side by side so it is clear which timer is going.
-    if phase == "border_sheeting":
-        sheet_name = "Border Sheeting"
-        sheet_time = database.format_elapsed(updated_task["border_elapsed"])
-    else:
-        sheet_name = "Field Sheeting"
-        sheet_time = database.format_elapsed(updated_task["field_elapsed"])
-
-    client.chat_update(
-        channel=channel_id,
-        ts=task["message_ts"],
-        text=f"Task T-{task_id}: packing now, {sheet_name.lower()} is waiting.",
-        blocks=[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"*Packing — In Progress*\n"
-                        f"_{sheet_name} is paused while you pack. Its time is safe, "
-                        f"and the job is still on that phase._\n"
-                        f"*ID:* T-{task_id}\n"
-                        f"*Customer:* {updated_task['customer_name']}\n"
-                        f"*Invoice:* {updated_task['invoice_number']}\n"
-                        f"*Task:* {updated_task['task_description']}\n"
-                        f"*Created by:* <@{updated_task['user_id']}>\n"
-                        f"*{sheet_name} Time So Far:* {sheet_time}\n"
-                        f"*Packing Time So Far:* {packing_time}"
-                    )
-                }
-            },
-            {
-                "type": "actions",
-                "block_id": f"task_actions_{task_id}",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Stop Packing"},
-                        "style": "danger",
-                        "action_id": "trk_stop_task",
-                        "value": str(task_id)
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": f"Back to {sheet_name}"},
-                        "style": "primary",
-                        "action_id": "trk_start_task",
-                        "value": str(task_id)
-                    }
-                ]
-            }
-        ]
-    )
-
-
-# Complete Task Button
-@app.action("trk_complete_task")
-def handle_complete(ack, body, client):
-    ack()
-    task_id = int(body["actions"][0]["value"])
-    user_id = body["user"]["id"]
-    task = database.get_task(task_id)
-    channel_id = body["container"]["channel_id"]
-    
-    if task is None:
-        client.chat_postEphemeral(channel=channel_id, user=user_id, text="Task Not Found. It may have been deleted")
-        return
-
-    if task["user_id"] != user_id:
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text="You can only control your own tasks."
+            text=refusal_text(outcome, task, "packing"),
         )
+        return
+
+    update_card(client, database.get_task(task_id), channel_id)
+
+
+@app.action("trk_complete_task")
+def handle_complete(ack, body, client):
+    """
+    Say a lane is finished, and go on to what it owes.
+
+    The only press on a card that finishes anything. The lane closes, the card
+    is rewritten so it says what comes next, and then the form that collects it
+    opens - in that order, so a maker who cancels the form is left on a card
+    offering it again rather than one still saying "finished".
+    """
+    ack()
+    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
+    user_id = body["user"]["id"]
+    channel_id = body["container"]["channel_id"]
+
+    task = resolve_job(client, body, task_id, user_id, channel_id)
+    if task is None:
         return
 
     outcome = database.complete_task(task_id)
-    if outcome == "another_phase_running":
-        # The packing timer is going - most likely this press came from an old
-        # sheeting card while the maker is packing. Finishing the phase under
-        # a running timer would strand it, so nothing has moved.
+    if outcome != "completed":
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text=("The packing timer is running on this job, so this phase has "
-                  "not been completed. Stop the packing first, then press "
-                  "Complete Phase again.")
+            text=refusal_text(outcome, task),
         )
         return
+
     updated_task = database.get_task(task_id)
     phase = updated_task["current_phase"]
-    
+    metadata = json.dumps({
+        "task_id": task_id,
+        "dm_channel_id": channel_id,
+        "team_channel_id": task["channel_id"],
+    })
+    update_card(client, updated_task, channel_id)
+
     if phase == "field_sheeting":
-        field_time = database.format_elapsed(updated_task["field_elapsed"])
-        metadata = json.dumps({"task_id": task_id, "dm_channel_id": channel_id, "team_channel_id": task["channel_id"]})
-        
         client.chat_postMessage(
             channel=task["channel_id"],
-            text=f" *T-{task_id} - Field Sheeting complete* | <@{user_id}> | Time: {field_time}"
+            text=f"T-{task_id} {updated_task['customer_name']}: field sheeting finished",
+            blocks=[{
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (f"*T-{task_id}  {updated_task['customer_name']}*\n"
+                             f"Field sheeting finished by <@{user_id}>\n"
+                             f"{lane_report(updated_task, 'field_sheeting')}")
+                }
+            }]
         )
-        
+
         client.views_open(
             trigger_id=body["trigger_id"],
             view={
                 "type": "modal",
                 "callback_id": "trk_border_modal",
-                "title": {"type": "plain_text", "text": "Border Sheeting"},
-                "submit": {"type": "plain_text", "text": "Start Border Phase"},
+                "title": {"type": "plain_text", "text": "Border details"},
+                "submit": {"type": "plain_text", "text": "Save and go to the border"},
                 "close": {"type": "plain_text", "text": "Cancel"},
                 "private_metadata": metadata,
                 "blocks": [
                     {
                         "type": "section",
-                        "text": {"type": "mrkdwn", "text": f"*Field Sheeting complete!* Time logged: *{field_time}*\nNow enter the Border Sheeting details."}
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (f"*Field sheeting finished.* "
+                                     f"{lane_report(updated_task, 'field_sheeting')}\n"
+                                     f"Now the border - or say there isn't one.")
+                        }
                     },
                     {
                         "type": "input",
                         "block_id": "border_design_block",
-                        "label": {"type": "plain_text", "text": "Border Design Name"},
-                        
+                        "label": {"type": "plain_text", "text": "Border design name"},
                         "element": {
                             "type": "plain_text_input",
                             "action_id": "border_design"
@@ -1078,24 +1539,27 @@ def handle_complete(ack, body, client):
                     {
                         "type": "input",
                         "block_id": "border_diff_block",
-                        "label": {"type": "plain_text", "text": "Border Difficulty"},
+                        "label": {"type": "plain_text", "text": "Border difficulty"},
                         "element": {
                             "type": "plain_text_input",
                             "action_id": "border_difficulty",
                             "max_length": 2
                         }
                     },
-                    # Same box as the Field one: usually a millimetre size,
-                    # but "template" and split sizes are fine too. Optional.
+                    # Usually a millimetre size, but "template" and split sizes
+                    # are real entries too. Optional here because the border
+                    # jig is often established during the border setup, and the
+                    # card can take it then.
                     {
                         "type": "input",
                         "block_id": "border_jig_block",
                         "optional": True,
-                        "label": {"type": "plain_text", "text": "Jig Size (mm)"},
+                        "label": {"type": "plain_text", "text": "Border jig or template"},
                         "element": {
                             "type": "plain_text_input",
                             "action_id": "border_jig",
-                            "placeholder": {"type": "plain_text", "text": "e.g. 49.6 or template"}
+                            "placeholder": {"type": "plain_text",
+                                            "text": "e.g. 49.6 or template - leave blank if not known yet"}
                         }
                     },
                     # Some jobs genuinely have no border. This is the moment the
@@ -1108,7 +1572,7 @@ def handle_complete(ack, body, client):
                         "elements": [
                             {
                                 "type": "button",
-                                "text": {"type": "plain_text", "text": "No Border"},
+                                "text": {"type": "plain_text", "text": "This job has no border"},
                                 "action_id": "trk_no_border",
                                 "value": str(task_id)
                             }
@@ -1117,48 +1581,41 @@ def handle_complete(ack, body, client):
                 ]
             }
         )
-    
-    #To start packing phase automatically
-    
+
     elif phase == "border_sheeting":
-        updated_task = database.get_task(task_id)
-        field_time = database.format_elapsed(updated_task["field_elapsed"])
-        border_time = database.format_elapsed(updated_task["border_elapsed"])
-        metadata = json.dumps({"task_id": task_id, "dm_channel_id": channel_id,"team_channel_id": task["channel_id"]})
-        
         client.chat_postMessage(
             channel=task["channel_id"],
-            text=f" *T -{task_id} - Border Sheeting complete* | <@{user_id}> | Time: {border_time}"
+            text=f"T-{task_id} {updated_task['customer_name']}: border finished",
+            blocks=[{
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (f"*T-{task_id}  {updated_task['customer_name']}*\n"
+                             f"Border finished by <@{user_id}>\n"
+                             f"{lane_report(updated_task, 'border_sheeting')}")
+                }
+            }]
         )
-        
-        #Deleting old card (message) before posting new phase
-        
-        client.chat_delete(channel=channel_id, ts=task ["message_ts"])
-        
+
         client.views_open(
             trigger_id=body["trigger_id"],
             view=packing_modal_view(
                 metadata,
-                (
-                    f"*Border Sheeting Complete!*\n"
-                    f"Field Sheeting Time: *{field_time}*\n"
-                    f"Border Sheeting Time: *{border_time}*\n"
-                    f"Click 'Start Packing Phase' when you're ready"
-                )
+                (f"*Border finished.*\n"
+                 f"{lane_report(updated_task, 'field_sheeting')}\n"
+                 f"{lane_report(updated_task, 'border_sheeting')}\n\n"
+                 f"That leaves the packing.")
             )
         )
-    
+
     elif phase == "packing":
-        packing_time = database.format_elapsed(updated_task["packing_elapsed"])
-        metadata = json.dumps({"task_id":task_id, "dm_channel_id": channel_id, "team_channel_id": task["channel_id"]})
-        
         client.views_open(
             trigger_id=body["trigger_id"],
             view={
                 "type": "modal",
                 "callback_id": "trk_notes_modal",
-                "title": {"type": "plain_text", "text": "Job Notes (Phase 4)"},
-                "submit": {"type": "plain_text", "text": "Complete Job"},
+                "title": {"type": "plain_text", "text": "Finish the job"},
+                "submit": {"type": "plain_text", "text": "Finish the job"},
                 "close": {"type": "plain_text", "text": "Cancel"},
                 "private_metadata": metadata,
                 "blocks": [
@@ -1166,131 +1623,76 @@ def handle_complete(ack, body, client):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*Packing complete!* Time logged: *{packing_time}*\nAdd any final notes before closing this job."
+                            "text": (f"*Packing finished.* "
+                                     f"{lane_report(updated_task, 'packing')}\n"
+                                     f"Anything worth recording before this job closes?")
                         }
                     },
                     {
                         "type": "input",
                         "block_id": "notes_block",
                         "optional": True,
-                        "label": {"type": "plain_text", "text": "General Notes"},
+                        "label": {"type": "plain_text", "text": "Notes"},
                         "element": {
                             "type": "plain_text_input",
                             "multiline": True,
-                            "action_id": "general_notes"
+                            "action_id": "general_notes",
+                            "placeholder": {"type": "plain_text",
+                                            "text": "Anything the next person should know"}
                         }
                     },
                     {
                         "type": "input",
                         "block_id": "issues_block",
                         "optional": True,
-                        "label": {"type": "plain_text", "text": "Issues Encountered"},
+                        "label": {"type": "plain_text", "text": "Anything go wrong?"},
                         "element": {
                             "type": "plain_text_input",
                             "multiline": True,
-                            "action_id": "issues"
+                            "action_id": "issues",
+                            "placeholder": {"type": "plain_text",
+                                            "text": "Breakages, wrong material, missing pieces"}
                         }
                     }
                 ]
             }
         )
-        
+
+
 @app.view("trk_border_modal")
-def handle_border_submission(ack,body, client):
+def handle_border_submission(ack, body, client):
     ack()
     user_id = body["user"]["id"]
     vals = body["view"]["state"]["values"]
     metadata = json.loads(body["view"]["private_metadata"])
     task_id = metadata["task_id"]
     dm_channel_id = metadata["dm_channel_id"]
-    team_channel_id = metadata["team_channel_id"]
-    
-# border details
+
     border_design = vals["border_design_block"]["border_design"]["value"]
     border_difficulty = vals["border_diff_block"]["border_difficulty"]["value"]
     border_jig = (vals["border_jig_block"]["border_jig"]["value"] or "").strip()
 
-# Transitioning to border phase in the database
     try:
         database.move_to_border_phase(task_id, border_design, border_difficulty, border_jig)
     except database.TrackerRefused as refusal:
         if refusal.reason != "another_phase_running":
             raise
-        # The packing timer is going, so the border cannot be put back
-        # underneath it. Say so; the form can be submitted again once the
-        # packing has been stopped.
+        # A timer is running on the job, so the border cannot be put back
+        # underneath it. Say so; the form can be filled in again once it stops.
         client.chat_postEphemeral(
             channel=dm_channel_id,
             user=user_id,
-            text=("The packing timer is running on this job, so the border "
-                  "details have not been saved. Stop the packing first, then "
-                  "press Complete Phase to get this form back.")
+            text=("A timer is running on this job, so the border details have not been saved. "
+                  "Pause it first, then press the button on the card to get this form back.")
         )
         return
+
     task = database.get_task(task_id)
-    field_time = database.format_elapsed(task["field_elapsed"])
-    border_jig_line = f"*Jig Size:* {border_jig}\n" if border_jig else ""
-    # A job can already hold packing time here - packed during field work, or
-    # packed before a missed border came to light. Shown so it is not "lost".
-    packing_line = (
-        f"*Packing Time So Far:* {database.format_elapsed(task['packing_elapsed'])}\n"
-        if task["packing_elapsed"] else ""
-    )
-    
-# Updating the DM card
-
-    client.chat_delete(channel=dm_channel_id, ts=task["message_ts"])
-    
-# posting card to the channel
-    result = client.chat_postMessage(
-        channel=dm_channel_id,
-        text=f"Task T -{task_id} has moved to Border Sheeting.",
-        blocks=[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"*Phase 2/4: Border Sheeting — Ready to Start*\n"
-                        f"*ID:* T-{task_id}\n"
-                        f"*Customer:* {task['customer_name']}\n"
-                        f"*Invoice:* {task['invoice_number']}\n"
-                        f"*Task:* {task['task_description']}\n"
-                        f"*Border Design:* {border_design}\n"
-                        f"*Border Difficulty:* {border_difficulty}\n"
-                        f"{border_jig_line}"
-                        f"*Created by:* <@{task['user_id']}>\n"
-                        f"*Field Sheeting Time:* {field_time}\n"
-                        f"{packing_line}"
-                        f"*Status:* Created"
-                    )
-                }
-            },
-            {
-                "type": "actions",
-                "block_id": f"task_actions_{task_id}",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Start"},
-                        "style": "primary",
-                        "action_id": "trk_start_task",
-                        "value": str(task_id)
-                    },
-                    # The field sheets exist by now, so packing can genuinely
-                    # cut in before border work has even started.
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Start Packing"},
-                        "action_id": "trk_start_packing",
-                        "value": str(task_id)
-                    }
-                ]
-            }
-        ]
+    repost_card(
+        client, task, dm_channel_id,
+        note="*Border details saved.* Start the border when you are ready.",
     )
 
-    database.update_message_ts(task_id, result["channel"], result["ts"])
 
 @app.action("trk_no_border")
 def handle_no_border(ack, body, client):
@@ -1316,7 +1718,7 @@ def handle_no_border(ack, body, client):
         client.chat_postEphemeral(
             channel=dm_channel_id,
             user=user_id,
-            text="Task not found. It may have been deleted."
+            text="That job is not there any more - it may have been deleted."
         )
         return
 
@@ -1324,31 +1726,36 @@ def handle_no_border(ack, body, client):
         client.chat_postEphemeral(
             channel=dm_channel_id,
             user=user_id,
-            text="You can only control your own tasks."
+            text="This is <@" + task["user_id"] + ">'s job, so only they can change it."
         )
         return
 
     database.skip_border_phase(task_id)
 
     updated_task = database.get_task(task_id)
-    field_time = database.format_elapsed(updated_task["field_elapsed"])
 
     client.chat_postMessage(
         channel=team_channel_id,
-        text=f" *T-{task_id} - No Border on this job* | <@{user_id}>"
+        text=f"T-{task_id} {updated_task['customer_name']}: no border on this job",
+        blocks=[{
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (f"*T-{task_id}  {updated_task['customer_name']}*\n"
+                         f"No border on this job - <@{user_id}>")
+            }
+        }]
     )
 
     client.views_update(
         view_id=body["view"]["id"],
         view=packing_modal_view(
             json.dumps(metadata),
-            (
-                f"*No Border on this job.*\n"
-                f"Field Sheeting Time: *{field_time}*\n"
-                f"Click 'Start Packing Phase' when you're ready.\n\n"
-                f"_Chose this by mistake? Cancel, then press Complete Phase "
-                f"again to get the border details form back._"
-            )
+            (f"*No border on this job.*\n"
+             f"{lane_report(updated_task, 'field_sheeting')}\n\n"
+             f"That leaves the packing.\n\n"
+             f"_Pressed this by mistake? Cancel, then press the button on the card to get the "
+             f"border form back._")
         )
     )
 
@@ -1356,118 +1763,45 @@ def handle_no_border(ack, body, client):
 @app.action("trk_undo_no_border")
 def handle_undo_no_border(ack, body, client):
     """
-    Take back a "No Border" from the packing card.
+    Take back a "no border" from the packing card.
 
     The refusal is shown, never hidden. If the correction did not happen the
     card is left exactly as it was: rebuilding it as though it had worked would
-    leave the maker believing they have a border phase back when the record
-    still says the border was skipped.
+    leave the maker believing they have a border back when the record still
+    says the border was skipped.
     """
     ack()
-    task_id = int(body["actions"][0]["value"])
+    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
     user_id = body["user"]["id"]
     channel_id = body["container"]["channel_id"]
-    task = database.get_task(task_id)
 
+    task = resolve_job(client, body, task_id, user_id, channel_id)
     if task is None:
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text="Task not found. It may have been deleted."
-        )
-        return
-
-    if task["user_id"] != user_id:
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text="You can only control your own tasks."
-        )
         return
 
     outcome = database.revert_border_skip(task_id)
 
     if outcome != "reverted":
         if outcome == "border_skip_not_reversible":
-            text = (
-                "Packing has already been finished on this job, so the border "
-                "cannot be reopened from here. Nothing has been changed. Add "
-                "what happened to the job's notes and tell a supervisor."
-            )
+            text = ("The packing is already finished on this job, so the border cannot be "
+                    "reopened from here. Nothing has been changed - put what happened in the "
+                    "job's notes and tell a supervisor.")
         elif outcome == "another_phase_running":
-            text = (
-                "The packing timer is running on this job. Stop it first, then "
-                "press 'Border after all' again. Nothing has been changed."
-            )
+            text = ("A timer is running on this job. Pause it first, then press "
+                    "'Border after all' again. Nothing has been changed.")
         elif outcome == "border_not_skipped":
-            text = "This job is not marked 'No Border', so there is nothing to undo."
+            text = "This job is not marked as having no border, so there is nothing to undo."
         else:
             text = "That could not be undone, so nothing has been changed."
         client.chat_postEphemeral(channel=channel_id, user=user_id, text=text)
         return
 
     updated_task = database.get_task(task_id)
-    field_time = database.format_elapsed(updated_task["field_elapsed"])
-    field_jig_line = f"*Jig Size:* {updated_task['field_jigs']}\n" if updated_task["field_jigs"] else ""
-    # Packing may already have been worked before the border came to light.
-    # That time is real and keeps counting toward the job - showing it here
-    # says so, instead of leaving the maker wondering where it went.
-    packing_line = (
-        f"*Packing Time So Far:* {database.format_elapsed(updated_task['packing_elapsed'])}\n"
-        if updated_task["packing_elapsed"] else ""
+    repost_card(
+        client, updated_task, channel_id,
+        note=("*Border back on this job.* Any packing time already recorded stays. "
+              "Press the button below for the border details."),
     )
-
-    client.chat_delete(channel=channel_id, ts=task["message_ts"])
-
-    result = client.chat_postMessage(
-        channel=channel_id,
-        text=f"Task T-{task_id} is back at the border details step.",
-        blocks=[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"*Phase 1/4: Field Sheeting — Complete*\n"
-                        f"*ID:* T-{task_id}\n"
-                        f"*Customer:* {updated_task['customer_name']}\n"
-                        f"*Invoice:* {updated_task['invoice_number']}\n"
-                        f"*Task:* {updated_task['task_description']}\n"
-                        f"*Field Design:* {updated_task['field_design']}\n"
-                        f"*Difficulty:* {updated_task['difficulty']}\n"
-                        f"{field_jig_line}"
-                        f"*Due:* {updated_task['due_date']}\n"
-                        f"*Created by:* <@{updated_task['user_id']}>\n"
-                        f"*Field Sheeting Time:* {field_time}\n"
-                        f"{packing_line}"
-                        f"*Status:* No Border undone — press Complete Phase for "
-                        f"the border details"
-                    )
-                }
-            },
-            {
-                "type": "actions",
-                "block_id": f"task_actions_{task_id}",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Complete Phase"},
-                        "style": "primary",
-                        "action_id": "trk_complete_task",
-                        "value": str(task_id)
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Add Jig"},
-                        "action_id": "trk_add_jig",
-                        "value": str(task_id)
-                    }
-                ]
-            }
-        ]
-    )
-
-    database.update_message_ts(task_id, result["channel"], result["ts"])
 
 
 @app.view("trk_packing_modal")
@@ -1477,7 +1811,6 @@ def handle_packing_submission(ack, body, client):
     metadata = json.loads(body["view"]["private_metadata"])
     task_id = metadata["task_id"]
     dm_channel_id = metadata["dm_channel_id"]
-    team_channel_id = metadata ["team_channel_id"]
 
     outcome = database.move_to_packing_phase(task_id)
     if outcome != "moved":
@@ -1487,89 +1820,21 @@ def handle_packing_submission(ack, body, client):
         client.chat_postEphemeral(
             channel=dm_channel_id,
             user=user_id,
-            text=("This job's border has changed since this form was opened, so it "
-                  "has not been moved to Packing and nothing has been changed. "
-                  "Go back to the job's card and carry on from there.")
+            text=("This job's border has changed since that form was opened, so it has not been "
+                  "moved to packing and nothing has been changed. Go back to the job's card and "
+                  "carry on from there.")
         )
         return
 
     task = database.get_task(task_id)
-    field_time = database.format_elapsed(task["field_elapsed"])
-    border_time = border_time_display(task)
-    # Packing worked earlier as an interruption arrives here with time already
-    # on the clock. Shown, so the maker knows it counted.
-    packing_line = (
-        f"*Packing Time So Far:* {database.format_elapsed(task['packing_elapsed'])}\n"
-        if task["packing_elapsed"] else ""
+    repost_card(
+        client, task, dm_channel_id,
+        note="*On to the packing.* Start it when you are ready.",
     )
 
-    # The border route deleted the old card before opening this modal. The No
-    # Border route deliberately did not, so that cancelling left the maker on a
-    # live card with the decision still open - so clear it here, now that they
-    # have committed to packing.
-    if task.get("border_skipped") and task.get("message_ts"):
-        try:
-            client.chat_delete(channel=dm_channel_id, ts=task["message_ts"])
-        except SlackApiError:
-            # Already gone is the outcome this wanted anyway.
-            pass
 
-    # The way back, offered only while there is a way back. A phase can wait
-    # paused while other work happens, so packing time on the clock does not
-    # close the border question - only FINISHING the packing does. Until then
-    # the button stays, and a button that always refuses is worse than no
-    # button.
-    packing_actions = [
-        {
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Start"},
-            "style": "primary",
-            "action_id": "trk_start_task",
-            "value": str(task_id)
-        }
-    ]
-    if task.get("border_skipped") and not task.get("packing_finished"):
-        packing_actions.append({
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Border after all"},
-            "action_id": "trk_undo_no_border",
-            "value": str(task_id)
-        })
-
-    result = client.chat_postMessage(
-        channel=dm_channel_id,
-        text = f"Task T-{task_id} has moved to Packing.",
-        blocks=[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"*Phase 3/4: Packing — Ready to Start*\n"
-                        f"*ID:* T-{task_id}\n"
-                        f"*Customer:* {task['customer_name']}\n"
-                        f"*Invoice:* {task['invoice_number']}\n"
-                        f"*Task:* {task['task_description']}\n"
-                        f"*Field Sheeting Time:* {field_time}\n"
-                        f"*Border Sheeting Time:* {border_time}\n"
-                        f"{packing_line}"
-                        f"*Created by:* <@{task['user_id']}>\n"
-                        f"*Status:* Created"
-                    )
-                }
-            },
-            {
-                "type": "actions",
-                "block_id": f"task_actions_{task_id}",
-                "elements": packing_actions
-            }
-        ]
-    )
-    
-    database.update_message_ts(task_id, result["channel"], result["ts"])
-    
 @app.view("trk_notes_modal")
-def handle_notes_submission(ack,body,client):
+def handle_notes_submission(ack, body, client):
     ack()
     user_id = body["user"]["id"]
     vals = body["view"]["state"]["values"]
@@ -1577,135 +1842,80 @@ def handle_notes_submission(ack,body,client):
     task_id = metadata["task_id"]
     dm_channel_id = metadata["dm_channel_id"]
     team_channel_id = metadata["team_channel_id"]
-    
+
     general_notes = vals["notes_block"]["general_notes"]["value"] or "None"
     issues = vals["issues_block"]["issues"]["value"] or "None"
-    
+
     database.save_notes_and_complete(task_id, general_notes, issues)
     task = database.get_task(task_id)
-    
-# Calculating all phase times and overall time
 
-    elapsed = database.get_phase_elapsed(task_id)
-    field_time = database.format_elapsed(elapsed["field_elapsed"])
-    border_time = border_time_display(task)
-    packing_time = database.format_elapsed(elapsed["packing_elapsed"])
-    total_time = database.format_elapsed(elapsed["total_elapsed"])
+    total_time = database.format_elapsed(task["total_elapsed"])
 
-    # Jig lines for the summary, shown only when a jig was recorded
-    field_jig_line = f"*Field Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
-    border_jig_line = f"*Border Jig Size:* {task['border_jigs']}\n" if task["border_jigs"] else ""
-    
-# Deleting packing card before posting final summary
     client.chat_update(
-        channel = dm_channel_id,
+        channel=dm_channel_id,
         ts=task["message_ts"],
-        text=f" Job T-{task_id} is complete. Summary posted to the team channel.",
-        blocks =[
+        text=f"T-{task_id} is finished.",
+        blocks=[
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": header_text(task, "  -  finished")},
+            },
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": (
-                        f"✅ *Job Complete — T-{task_id}*\n"
-                        f"*Customer:* {task['customer_name']}\n"
-                        f"Total Time: {total_time}\n"
-                        f"The full summary has been posted to the team channel"
-                    )
-                }
-            }
+                    "text": (f"*Total time: {total_time}*\n"
+                             f"The full breakdown has gone to the team channel."),
+                },
+            },
         ]
     )
-    
+
     client.chat_postMessage(
         channel=team_channel_id,
-        text=f" Job T-{task_id} fully completed by <@{user_id}>",
-        blocks =[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"✅ *Job Complete — T-{task_id}*\n"
-                        f"*Customer:* {task['customer_name']}\n"
-                        f"*Invoice:* {task['invoice_number']}\n"
-                        f"*Task:* {task['task_description']}\n"
-                        f"{field_jig_line}"
-                        f"{border_jig_line}"
-                        f"*Completed by:* <@{user_id}>\n\n"
-                        f"*Phase Breakdown:*\n"
-                        f"🟦 Field Sheeting: {field_time}\n"
-                        f"🟨 Border Sheeting: {border_time}\n"
-                        f"📦 Packing: {packing_time}\n\n"
-                        f"⏱️ *Total Time: {total_time}*\n\n"
-                        f"*General Notes:* {general_notes}\n"
-                        f"*Issues Encountered:* {issues}"
-                    )
-                }
-            }
-        ]
+        text=f"T-{task_id} {task['customer_name']} finished by <@{user_id}> - {total_time}",
+        blocks=job_summary_blocks(task, user_id, general_notes, issues),
     )
-    
 
-        
-# Add Jig button - a phase sometimes needs another jig part way through.
-# Maybe the first jig turned out wrong and was swapped, maybe two sizes are
-# genuinely needed together. Either way the earlier jig really was used, so
-# this ADDS a record next to it - it never overwrites one. Typing mistakes
-# are fixed through Edit instead, which changes the value it names.
+
+# The jig. A lane sometimes needs another one part way through: maybe the first
+# turned out wrong and was swapped, maybe two sizes are genuinely needed
+# together. Either way the earlier jig really was used, so this ADDS a record
+# next to it - it never overwrites one. Typing mistakes are fixed through Edit
+# instead, which changes the value it names.
+#
+# It lives on every working card because the jig is normally established during
+# the setup, which is after the job was logged and can be well after the
+# sheeting started.
 
 @app.action("trk_add_jig")
 def handle_add_jig(ack, body, client):
     ack()
-    task_id = int(body["actions"][0]["value"])
+    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
     user_id = body["user"]["id"]
-    task = database.get_task(task_id)
     channel_id = body["container"]["channel_id"]
 
+    task = resolve_job(client, body, task_id, user_id, channel_id)
     if task is None:
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text="Task not found. It may have been deleted."
-        )
         return
-
-    if task["user_id"] != user_id:
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text="You can only control your own tasks."
-        )
-        return
-
-    # Jigs can be added as long as the job is open. A finished job has no
-    # card with this button, but a stale one could still be clicked.
     phase = task["current_phase"]
-    if phase == "completed":
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text="This job is finished - jigs can no longer be added."
-        )
-        return
 
     # Remember which phase the card was on, so the right card comes back
     # after the modal
     metadata = json.dumps({"task_id": task_id, "channel_id": channel_id, "phase": phase})
 
-    # During Field there is only one place a jig can go. From Border onwards
-    # the maker chooses, because sometimes Field work genuinely has to
-    # continue with another jig AFTER Field was completed - that is still an
-    # added jig, not a correction, and the earlier one must stay. The Border
-    # phase is offered once the maker has reached it.
+    # On the field there is only one place a jig can go. From the border
+    # onwards the maker chooses, because field work genuinely can continue with
+    # another jig AFTER the field was finished - that is still an added jig,
+    # not a correction, and the earlier one must stay.
     blocks = []
     if phase != "field_sheeting":
         field_option = {
-            "text": {"type": "plain_text", "text": "Field"},
+            "text": {"type": "plain_text", "text": "Field sheeting"},
             "value": "field_sheeting"
         }
         border_option = {
-            "text": {"type": "plain_text", "text": "Border"},
+            "text": {"type": "plain_text", "text": "Border sheeting"},
             "value": "border_sheeting"
         }
         # A border that did not happen used no jig, and storage refuses one,
@@ -1714,7 +1924,7 @@ def handle_add_jig(ack, body, client):
         phase_element = {
             "type": "static_select",
             "action_id": "jig_phase",
-            "placeholder": {"type": "plain_text", "text": "Field or Border?"},
+            "placeholder": {"type": "plain_text", "text": "Field or border?"},
             "options": [field_option] if task.get("border_skipped") else [field_option, border_option]
         }
         if task.get("border_skipped"):
@@ -1727,17 +1937,17 @@ def handle_add_jig(ack, body, client):
         blocks.append({
             "type": "input",
             "block_id": "phase_block",
-            "label": {"type": "plain_text", "text": "Which phase used it?"},
+            "label": {"type": "plain_text", "text": "Which work used it?"},
             "element": phase_element
         })
     blocks.append({
         "type": "input",
         "block_id": "jig_block",
-        "label": {"type": "plain_text", "text": "Jig Size (mm)"},
+        "label": {"type": "plain_text", "text": "Jig or template"},
         "element": {
             "type": "plain_text_input",
             "action_id": "jig_size",
-            "placeholder": {"type": "plain_text", "text": "e.g. 49.6 or template"}
+            "placeholder": {"type": "plain_text", "text": "e.g. 49.6, 49.4/49.8, or template"}
         }
     })
 
@@ -1746,8 +1956,8 @@ def handle_add_jig(ack, body, client):
         view={
             "type": "modal",
             "callback_id": "trk_add_jig_modal",
-            "title": {"type": "plain_text", "text": "Add Jig"},
-            "submit": {"type": "plain_text", "text": "Add"},
+            "title": {"type": "plain_text", "text": "Jig or template"},
+            "submit": {"type": "plain_text", "text": "Save"},
             "close": {"type": "plain_text", "text": "Cancel"},
             "private_metadata": metadata,
             "blocks": blocks
@@ -1762,7 +1972,6 @@ def handle_add_jig_submission(ack, body, client):
     metadata = json.loads(body["view"]["private_metadata"])
     task_id = metadata["task_id"]
     channel_id = metadata["channel_id"]
-    phase = metadata["phase"]
 
     jig_size = (vals["jig_block"]["jig_size"]["value"] or "").strip()
     if not jig_size:
@@ -1785,152 +1994,18 @@ def handle_add_jig_submission(ack, body, client):
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text=f"Jig '{jig_size}' was not recorded - the task is no longer open."
+            text=f"'{jig_size}' was not recorded - that job is no longer open."
         )
         return
 
-    # Refresh the card so the maker sees every jig recorded so far
-    field_jig_line = f"*Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
-    border_jig_line = f"*Jig Size:* {task['border_jigs']}\n" if task["border_jigs"] else ""
-    running = task["status"] == "in_progress"
-    status_text = "In Progress" if running else "Paused"
+    update_card(client, task, channel_id, note=f"*Jig recorded: {jig_size}*")
 
-    if phase == "field_sheeting":
-        card_text = (
-            f"*Phase 1/4: Field Sheeting — {status_text}*\n"
-            f"*ID:* T-{task_id}\n"
-            f"*Customer:* {task['customer_name']}\n"
-            f"*Invoice:* {task['invoice_number']}\n"
-            f"*Task:* {task['task_description']}\n"
-            f"*Field Design:* {task['field_design']}\n"
-            f"*Difficulty:* {task['difficulty']}\n"
-            f"{field_jig_line}"
-            f"*Due:* {task['due_date']}\n"
-            f"*Created by:* <@{task['user_id']}>\n"
-            f"*Status:* {status_text}"
-        )
-    elif phase == "border_sheeting":
-        field_time = database.format_elapsed(task["field_elapsed"])
-        card_text = (
-            f"*Phase 2/4: Border Sheeting — {status_text}*\n"
-            f"*ID:* T-{task_id}\n"
-            f"*Customer:* {task['customer_name']}\n"
-            f"*Invoice:* {task['invoice_number']}\n"
-            f"*Task:* {task['task_description']}\n"
-            f"*Border Design:* {task['border_design']}\n"
-            f"*Border Difficulty:* {task['border_difficulty']}\n"
-            f"{border_jig_line}"
-            f"*Created by:* <@{task['user_id']}>\n"
-            f"*Field Sheeting Time:* {field_time}\n"
-            f"*Status:* {status_text}"
-        )
-    else:
-        # The packing card is not a jig phase itself, so its lines say which
-        # phase each jig belongs to
-        field_time = database.format_elapsed(task["field_elapsed"])
-        border_time = border_time_display(task)
-        named_field_line = f"*Field Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
-        named_border_line = f"*Border Jig Size:* {task['border_jigs']}\n" if task["border_jigs"] else ""
-        card_text = (
-            f"*Phase 3/4: Packing — {status_text}*\n"
-            f"*ID:* T-{task_id}\n"
-            f"*Customer:* {task['customer_name']}\n"
-            f"*Invoice:* {task['invoice_number']}\n"
-            f"*Task:* {task['task_description']}\n"
-            f"{named_field_line}"
-            f"{named_border_line}"
-            f"*Created by:* <@{task['user_id']}>\n"
-            f"*Field Sheeting Time:* {field_time}\n"
-            f"*Border Sheeting Time:* {border_time}\n"
-            f"*Status:* {status_text}"
-        )
-
-    # Same buttons the card had before the modal opened
-    if running:
-        buttons = [
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Stop"},
-                "style": "danger",
-                "action_id": "trk_stop_task",
-                "value": str(task_id)
-            },
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Complete Phase"},
-                "action_id": "trk_complete_task",
-                "value": str(task_id)
-            }
-        ]
-    else:
-        buttons = [
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Resume"},
-                "style": "primary",
-                "action_id": "trk_start_task",
-                "value": str(task_id)
-            },
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Edit"},
-                "action_id": "trk_edit_task",
-                "value": str(task_id)
-            },
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Complete Phase"},
-                "action_id": "trk_complete_task",
-                "value": str(task_id)
-            }
-        ]
-    # Keep Start Packing through a jig add, the same way Add Jig itself is
-    # kept - a recorded jig must not cost the card a button it had.
-    if phase in ("field_sheeting", "border_sheeting") and not task.get("packing_finished"):
-        buttons.append({
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Start Packing"},
-            "action_id": "trk_start_packing",
-            "value": str(task_id)
-        })
-    # And keep the way back on a paused No Border packing card, for the same
-    # reason.
-    if phase == "packing" and not running and task.get("border_skipped") and not task.get("packing_finished"):
-        buttons.append({
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Border after all"},
-            "action_id": "trk_undo_no_border",
-            "value": str(task_id)
-        })
-    buttons.append({
-        "type": "button",
-        "text": {"type": "plain_text", "text": "Add Jig"},
-        "action_id": "trk_add_jig",
-        "value": str(task_id)
-    })
-
-    client.chat_update(
-        channel=channel_id,
-        ts=task["message_ts"],
-        text=f"Task T-{task_id}: jig {jig_size} recorded.",
-        blocks=[
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": card_text}
-            },
-            {
-                "type": "actions",
-                "block_id": f"task_actions_{task_id}",
-                "elements": buttons
-            }
-        ]
-    )
 
 #Delete Button
 @app.action("trk_delete_task")
 def handle_delete(ack, body, client):
     ack()
-    task_id = int(body["actions"][0]["value"])
+    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
     user_id = body["user"]["id"]
     task = database.get_task(task_id)
     channel_id = body["container"]["channel_id"]
@@ -1975,7 +2050,7 @@ def handle_delete(ack, body, client):
 @app.action("trk_edit_task")
 def handle_edit(ack, body, client):
     ack()
-    task_id = int(body["actions"][0]["value"])
+    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
     user_id = body["user"]["id"]
     task = database.get_task(task_id)
     channel_id = body["container"]["channel_id"]
@@ -2157,129 +2232,14 @@ def handle_edit_submission(ack, body, client):
         if new_value and new_value != previous_jigs.get(jig_id):
             database.correct_jig(task_id, jig_id, new_value)
 
-    # Fetch updated task to refresh the card
+    # Refresh the card so the corrections show. The job's own state decides
+    # what it says and which buttons it keeps - an edit is not a change of
+    # what the maker is doing.
     task = database.get_task(task_id)
+    if task is not None and task["current_phase"] != "completed":
+        update_card(client, task, channel_id, note="*Details updated.*")
 
-    # Rebuild the card based on current status
-    if task["status"] == "created":
-        buttons = [
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Start"},
-                "style": "primary",
-                "action_id": "trk_start_task",
-                "value": str(task_id)
-            },
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Edit"},
-                "action_id": "trk_edit_task",
-                "value": str(task_id)
-            },
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Delete"},
-                "style": "danger",
-                "action_id": "trk_delete_task",
-                "value": str(task_id),
-                "confirm": {
-                        "title": {"type": "plain_text", "text": "Delete Task?"},
-                        "text": {"type": "plain_text", "text": "Are you sure you want to delete this task? This cannot be undone."},
-                        "confirm": {"type": "plain_text", "text": "Yes, Delete"},
-                        "deny": {"type": "plain_text", "text": "Cancel"}
-                        }
-            }
-        ]
-        status_text = "Created"
-    else:
-        buttons = [
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Resume"},
-                "style": "primary",
-                "action_id": "trk_start_task",
-                "value": str(task_id)
-            },
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Edit"},
-                "action_id": "trk_edit_task",
-                "value": str(task_id)
-            },
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Complete"},
-                "action_id": "trk_complete_task",
-                "value": str(task_id)
-            }
-        ]
-        # Keep Start Packing through an edit for the same reason Add Jig is
-        # kept below - saving an edit must not cost the card a button it had.
-        if task["current_phase"] in ("field_sheeting", "border_sheeting") and not task.get("packing_finished"):
-            buttons.append({
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Start Packing"},
-                "action_id": "trk_start_packing",
-                "value": str(task_id)
-            })
-        # And the way back on a paused No Border packing card, likewise.
-        if task["current_phase"] == "packing" and task.get("border_skipped") and not task.get("packing_finished"):
-            buttons.append({
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Border after all"},
-                "action_id": "trk_undo_no_border",
-                "value": str(task_id)
-            })
-        # Keep the Add Jig button through an edit - without this, saving an
-        # edit on a paused sheeting card would silently drop it until the
-        # next stop or resume
-        if task["current_phase"] in ("field_sheeting", "border_sheeting", "packing"):
-            buttons.append({
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Add Jig"},
-                "action_id": "trk_add_jig",
-                "value": str(task_id)
-            })
-        status_text = "🟠 Paused"
 
-    # Jig lines refreshed from the database, so they show any corrections.
-    # This card is not phase-specific, so each line names its phase - a
-    # border job's jig must not look wiped just because an edit was saved.
-    field_jig_line = f"*Field Jig Size:* {task['field_jigs']}\n" if task["field_jigs"] else ""
-    border_jig_line = f"*Border Jig Size:* {task['border_jigs']}\n" if task["border_jigs"] else ""
-
-    client.chat_update(
-        channel=channel_id,
-        ts=task["message_ts"],
-        text=f"Task T-{task_id} has been updated.",
-        blocks=[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"*Task Updated ✏️ - Phase 1/4: Field Sheeting*\n"
-                        f"*ID:* T-{task_id}\n"
-                        f"*Customer:* {customer_name}\n"
-                        f"*Invoice:* {invoice_number}\n"
-                        f"*Task:* {task_description}\n"
-                        f"*Field Design:* {design}\n"
-                        f"*Difficulty:* {difficulty}\n"
-                        f"{field_jig_line}"
-                        f"{border_jig_line}"
-                        f"*Due:* {due_date}\n"
-                        f"*Created by:* <@{task['user_id']}>\n"
-                        f"*Status:* {status_text}"
-                    )
-                }
-            },
-            {
-                "type": "actions",
-                "block_id": f"task_actions_{task_id}",
-                "elements": buttons
-            }
-        ]
-    )   
 if __name__ == "__main__":
     database.setup_database()
     handler = SocketModeHandler(app, os.environ.get("SLACK_APP_TOKEN"))
