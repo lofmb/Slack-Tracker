@@ -605,7 +605,10 @@ def _lane_lines(task, phase):
         lane = "field" if phase == "field_sheeting" else "border"
         cutting = task.get(lane + "_cutting_elapsed") or 0
         if cutting:
-            lines.append("     ◦  of which cutting  " + database.format_duration(cutting))
+            # An en dash rather than a hollow bullet: both read as a level
+            # below, and this one survives a Windows console, where the proof
+            # harnesses print card text back when a check fails.
+            lines.append("     –  of which cutting  " + database.format_duration(cutting))
     return lines
 
 
