@@ -687,6 +687,23 @@ def job_summary_blocks(task, finished_by, general_notes, issues):
         },
     ]
 
+def border_route(task):
+    """
+    How THIS card reaches the border, in the words of a button that is on it.
+
+    Straight from a finished field the card offers the border's own starts.
+    After Border after all it does not: the maker is paused on packing, so
+    Resume packing is the forward move and the border is reached through Switch
+    work. Saying "start the border" there names a button that is not there.
+    """
+    for button in card_actions(task):
+        if button.get("action_id") not in ("trk_start_setup", "trk_start_production"):
+            continue
+        if "border_sheeting" in (button.get("value") or ""):
+            return "Start the border when you are ready."
+    return "Use Switch work and choose the border when you are ready."
+
+
 def job_card(task, note=None):
     """
     The whole card. Returns (fallback text, blocks).
@@ -705,10 +722,13 @@ def job_card(task, note=None):
         "type": "section",
         "text": {"type": "mrkdwn", "text": "\n".join(_status_lines(task))},
     })
-    blocks.append({"type": "section", "fields": _fields(task)})
-    times = _time_lines(task)
-    if times:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(times)}})
+    # The buttons come BEFORE the reading matter. On a phone the job's
+    # details and its times run to about thirty lines, and a maker wanting
+    # to pause or start the cutting had to scroll past all of it - while
+    # standing at a bench, usually mid-task. Which job this is and what
+    # they are on stay above, because those say whether it is even the
+    # right card; the times and the rest of the job sit below, where
+    # reading is what a maker is doing anyway.
     actions = card_actions(task)
     if actions:
         blocks.append({
@@ -716,6 +736,10 @@ def job_card(task, note=None):
             "block_id": "task_actions_" + str(task_id),
             "elements": actions,
         })
+    times = _time_lines(task)
+    if times:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(times)}})
+    blocks.append({"type": "section", "fields": _fields(task)})
     footer = "Logged by <@" + task["user_id"] + ">"
     on_setup = task.get("working_on") or {}
     if on_setup.get("activity") == "setup":
@@ -1749,7 +1773,7 @@ def handle_border_submission(ack, body, client):
     task = database.get_task(task_id)
     repost_card(
         client, task, dm_channel_id,
-        note="*Border details saved.* Start the border when you are ready.",
+        note="*Border details saved.* " + border_route(task),
     )
 
 
