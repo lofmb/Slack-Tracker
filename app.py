@@ -700,13 +700,18 @@ def delete_still_applies(task):
 
 
 def _delete_button(task_id):
+    # The word, not the behaviour. This has never deleted anything: it cancels
+    # and keeps the record (see handle_delete), and every other string the
+    # maker meets already says so - the dialog body, its confirm button, and
+    # the card they are left with. "Delete" was the last place that did not.
+    # The action id is unchanged, so cards already sitting in DMs still work.
     return _button(
-        "Delete job",
+        "Cancel job",
         "trk_delete_task",
         work_value(task_id),
         style="danger",
         confirm={
-            "title": {"type": "plain_text", "text": "Delete this job?"},
+            "title": {"type": "plain_text", "text": "Cancel this job?"},
             "text": {
                 "type": "plain_text",
                 "text": (
@@ -1841,8 +1846,8 @@ def step_2_view(step1_data):
     blocks.append({
         "type": "context",
         "elements": [{"type": "mrkdwn",
-                      "text": "Creating the job starts the clock on its Initial setup, and "
-                              "sends your work card straight to you in a DM."}],
+                      "text": "Creating the job starts recording Initial setup time "
+                              "and sends your work card to you in a DM."}],
     })
     return {
         "type": "modal",
