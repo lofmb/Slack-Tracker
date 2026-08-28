@@ -2031,7 +2031,15 @@ def lane_details_view(task, part, phase, activity, channel_id):
     Saving starts the work the maker pressed for. That is the whole point of
     asking here: the form is on the way to the bench, not a detour from it.
     """
-    named = work_name(phase, "production", part_label(task, part))
+    # Name it for what the press starts, not for the lane's sheeting.
+    #
+    # This was hardcoded to "production", which was right while an untouched
+    # lane could be entered straight at its sheeting. It cannot any more - the
+    # only way into a lane nobody has touched is its setup - so a maker who
+    # pressed "Start field setup" met a form headed "Field sheeting" and then
+    # found their setup running. The form is the same two questions either way;
+    # only its heading has to agree with the button that opened it.
+    named = work_name(phase, activity, part_label(task, part))
     lane = lane_of(task, part, phase)
     which = "field" if phase == "field_sheeting" else "border"
     return {
