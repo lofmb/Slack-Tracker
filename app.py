@@ -188,6 +188,19 @@ def work_name(phase, activity, part=None):
     return f"Part {part} {name.lower()}"
 
 
+def lower_name(name):
+    """
+    A work name as it reads inside a sentence: "start field sheeting".
+
+    "Part" keeps its capital, because it is the name of the piece rather than a
+    word in the sentence - "Start part 2 border setup" reads as a typo, and
+    lowercasing a proper noun to fit a template is how it happened.
+    """
+    if name.startswith("Part "):
+        return name
+    return name[0].lower() + name[1:]
+
+
 def part_label(task, part):
     """
     "Part 2", or nothing at all on a job drawn as one piece.
@@ -388,7 +401,7 @@ def other_work_rows(task, already_offered=()):
         )
         label = work_name(phase, activity, part_label(task, part))
         if leading and work_elapsed(task, part, phase, activity):
-            label = "Back to " + label[0].lower() + label[1:]
+            label = "Back to " + lower_name(label)
         by_part.setdefault(part, []).append(_start_button(
             label, task_id, part, phase, activity, style="primary" if leading else None,
         ))
@@ -617,7 +630,7 @@ def _finish_button(task, part, phase):
             "text": {
                 "type": "plain_text",
                 "text": (
-                    "This closes " + named[0].lower() + named[1:] + " for good.\n\n"
+                    "This closes " + lower_name(named) + " for good.\n\n"
                     "Still something to do on it? Use Pause instead - that leaves it "
                     "unfinished and you can come back."
                 ),
@@ -703,7 +716,7 @@ def card_actions(task):
         if first:
             part, phase = first
             buttons.append(_start_button(
-                "Start " + work_name(phase, "setup", part_label(task, part)).lower(),
+                "Start " + lower_name(work_name(phase, "setup", part_label(task, part))),
                 task_id, part, phase, "setup", style="primary",
             ))
         buttons.append(_button("Pause setup", "trk_stop_task", work_value(task_id)))
@@ -717,7 +730,7 @@ def card_actions(task):
         # is the moment the jig becomes known, so both are on the card.
         part = here.get("part")
         buttons.append(_start_button(
-            "Start " + work_name(here["phase"], "production", part_label(task, part)).lower(),
+            "Start " + lower_name(work_name(here["phase"], "production", part_label(task, part))),
             task_id, part, here["phase"], "production", style="primary",
         ))
         buttons.append(_button("Pause setup", "trk_stop_task", work_value(task_id)))
@@ -766,11 +779,11 @@ def card_actions(task):
             # the sheeting is right beside it for a lane that needs no
             # preparing.
             buttons.append(_start_button(
-                "Start " + work_name(phase, "setup", part_label(task, part)).lower(),
+                "Start " + lower_name(work_name(phase, "setup", part_label(task, part))),
                 task_id, part, phase, "setup", style="primary",
             ))
             buttons.append(_start_button(
-                "Start " + work_name(phase, "production", part_label(task, part)).lower(),
+                "Start " + lower_name(work_name(phase, "production", part_label(task, part))),
                 task_id, part, phase, "production",
             ))
         else:
@@ -779,12 +792,12 @@ def card_actions(task):
             verb = "Resume" if work_elapsed(task, part, phase, activity) else "Start"
             named = work_name(phase, activity, part_label(task, part))
             buttons.append(_start_button(
-                verb + " " + named[0].lower() + named[1:],
+                verb + " " + lower_name(named),
                 task_id, part, phase, activity, style="primary",
             ))
             if activity == "setup":
                 buttons.append(_start_button(
-                    "Start " + work_name(phase, "production", part_label(task, part)).lower(),
+                    "Start " + lower_name(work_name(phase, "production", part_label(task, part))),
                     task_id, part, phase, "production",
                 ))
     buttons.append(_button("Edit details", "trk_edit_task", work_value(task_id)))
@@ -822,7 +835,7 @@ def _status_lines(task):
                 name = work_name(last["phase"], last["activity"], part_label(task, last.get("part")))
                 recorded = work_elapsed(task, last.get("part"), last["phase"], last["activity"])
             lines.append(
-                "Last on " + name[0].lower() + name[1:] + ", "
+                "Last on " + lower_name(name) + ", "
                 + database.format_duration(recorded) + " recorded."
             )
         return lines
