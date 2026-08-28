@@ -369,14 +369,33 @@ def _current_phase(job):
     return phase
 
 
-def _legacy_status(job, phases):
-    """Translate LMSA's job/phase state into the status vocabulary app.py reads."""
+def _legacy_status(job, phases, open_segment=None):
+    """
+    Translate LMSA's job/phase state into the status vocabulary the history and
+    the completed-job export were written against.
+
+    NOT what the card reads. The card reads working_on, straight from the
+    ledger, because one word cannot say which piece of which lane is accruing.
+    This survives for the records already written in its vocabulary.
+    """
     if job.get("status") == "completed":
         return "completed"
+    # Anything being timed means the maker is working, including the job's own
+    # opening setup - which has no lane row for the branch below to find.
+    if open_segment:
+        return "in_progress"
     phase_name = _current_phase(job)
     if phase_name == "completed":
         return "completed"
-    row = next((p for p in phases if p.get("phase") == phase_name), None)
+    cursor_part = job.get("currentPartId")
+    row = next(
+        (
+            p
+            for p in phases
+            if p.get("phase") == phase_name and p.get("partId") == cursor_part
+        ),
+        None,
+    )
     state = (row or {}).get("state")
     if state == "running":
         return "in_progress"
@@ -399,8 +418,19 @@ def _legacy_status(job, phases):
     return "created"
 
 
-def _phase_of(phases, name, field):
-    row = next((p for p in phases if p.get("phase") == name), None)
+def _phase_of(phases, name, field, part_id=None):
+    """
+    One lane's value.
+
+    `part_id` says WHICH piece's lane. Passing None means the job's own lane -
+    packing - which is the only one that belongs to no piece. A job drawn as
+    three pieces has three borders, so asking for "the border" without saying
+    which would return whichever row came back first.
+    """
+    row = next(
+        (p for p in phases if p.get("phase") == name and p.get("partId") == part_id),
+        None,
+    )
     return (row or {}).get(field)
 
 
@@ -418,7 +448,7 @@ def _packing_begun(phases, packing_seconds):
     return int(packing_seconds or 0) > 0
 
 
-def _jigs_of(view, phase_name):
+def _jigs_of(view, phase_name, part_number=None):
     """
     The jig records LMSA holds for one phase, in the order they were recorded.
 
@@ -431,7 +461,7 @@ def _jigs_of(view, phase_name):
     return [
         {"id": j["id"], "value": j["jigSizeText"]}
         for j in jigs
-        if j.get("phase") == phase_name
+        if j.get("phase") == phase_name and j.get("partNumber") == part_number
     ]
 
 
@@ -440,18 +470,27 @@ def _jig_display(records):
     return " / ".join(r["value"] for r in records)
 
 
-def _activity_seconds(timing, phase, activity):
+def _part_timing(timing, part_number):
+    """One piece's own figures out of the job's timing, or empty if it has none."""
+    for part in (timing or {}).get("perPart") or []:
+        if part.get("partNumber") == part_number:
+            return part
+    return {}
+
+
+def _activity_seconds(timing, phase, activity, part_number=None):
     """
     Setup or sheeting time for one lane.
 
     A lane's total is these two added together, which is why the card can show
     "Setup 1h, sheeting 5h" without either number being invented.
     """
-    per_phase = (timing or {}).get("perPhaseActivitySeconds") or {}
+    source = _part_timing(timing, part_number) if part_number else (timing or {})
+    per_phase = source.get("perPhaseActivitySeconds") or {}
     return int(((per_phase.get(phase) or {}).get(activity) or 0))
 
 
-def _cutting_seconds(timing, phase=None):
+def _cutting_seconds(timing, phase=None, part_number=None):
     """
     Cutting time, either for one lane or for the whole job.
 
@@ -461,23 +500,80 @@ def _cutting_seconds(timing, phase=None):
     """
     if phase is None:
         return int((timing or {}).get("cuttingSeconds") or 0)
-    return int(((timing or {}).get("cuttingSecondsByPhase") or {}).get(phase) or 0)
+    source = _part_timing(timing, part_number) if part_number else (timing or {})
+    return int((source.get("cuttingSecondsByPhase") or {}).get(phase) or 0)
+
+
+def _lane(view, timing, part, phase):
+    """
+    One lane on one piece, as a small dict app.py reads.
+
+    Everything about a Field or a Border is in here, and nothing about it is
+    anywhere else. That is the whole correction: the old row had one
+    `border_design`, so a job drawn as three pieces had two borders it could
+    not describe.
+    """
+    phases = view.get("phases") or []
+    part_id = part["id"]
+    number = part["partNumber"]
+    state = _phase_of(phases, phase, "state", part_id)
+    jig_records = _jigs_of(view, phase, number)
+    setup = _activity_seconds(timing, phase, "setup", number)
+    production = _activity_seconds(timing, phase, "production", number)
+    return {
+        "phase": phase,
+        "part": number,
+        # A lane the diagram does not have is 'skipped' from the moment the job
+        # is created - recorded as work that did not happen, never as work that
+        # took no time. Both sum to zero seconds, so nothing else could tell
+        # them apart.
+        "present": state != "skipped",
+        "state": state,
+        "design": _phase_of(phases, phase, "designName", part_id),
+        "difficulty": _phase_of(phases, phase, "difficulty", part_id),
+        "setup_elapsed": setup,
+        "production_elapsed": production,
+        "elapsed": setup + production,
+        # Already inside the figures above, never added to them.
+        "cutting_elapsed": _cutting_seconds(timing, phase, number),
+        "jigs": _jig_display(jig_records),
+        "jig_records": jig_records,
+    }
 
 
 def _row(view, timing):
     """Build the dictionary app.py indexes into, from the API's job view."""
     job = view["job"]
     phases = view.get("phases") or []
+    parts = view.get("parts") or []
     seconds = (timing or {}).get("perPhaseSeconds") or {}
-    field = int(seconds.get("field_sheeting", 0) or 0)
-    border = int(seconds.get("border_sheeting", 0) or 0)
     packing = int(seconds.get("packing", 0) or 0)
     open_segment = view.get("openSegment") or None
     open_contained = view.get("openContained") or None
     last_segment = view.get("lastSegment") or None
 
-    field_jig_records = _jigs_of(view, "field_sheeting")
-    border_jig_records = _jigs_of(view, "border_sheeting")
+    # THE PIECES, in the order the maker reads the diagram. Each carries its
+    # own field and border, whole. Every question about a lane is asked of one
+    # of these, which is what makes "which one?" impossible to leave out.
+    part_rows = [
+        {
+            "part": part["partNumber"],
+            "field": _lane(view, timing, part, "field_sheeting"),
+            "border": _lane(view, timing, part, "border_sheeting"),
+        }
+        for part in parts
+    ]
+
+    # ONE-PIECE COMPATIBILITY. A job drawn as a single piece is what every job
+    # was before pieces could be named, and its Part 1 IS that job - so the
+    # flat keys below are exactly true for it. They are read by the completed-
+    # job export and the history it has already written, which must keep
+    # working. New code asks `parts` and never these: on a job with three
+    # pieces they describe the first one and say nothing about the others,
+    # which is precisely the ambiguity the parts model exists to remove.
+    first = part_rows[0] if part_rows else None
+    field = (first or {}).get("field") or {}
+    border = (first or {}).get("border") or {}
 
     return {
         "task_id": job["jobNumber"],
@@ -488,78 +584,111 @@ def _row(view, timing):
         "task_description": job["taskDescription"],
         "due_date": _due_date_to_text(job),
         "is_na_due_date": 1 if job.get("dueDateNotApplicable") else 0,
-        "field_design": _phase_of(phases, "field_sheeting", "designName"),
-        "difficulty": _phase_of(phases, "field_sheeting", "difficulty"),
-        "field_elapsed": field,
-        "field_jigs": _jig_display(field_jig_records),
-        "field_jig_records": field_jig_records,
-        "border_design": _phase_of(phases, "border_sheeting", "designName"),
-        "border_difficulty": _phase_of(phases, "border_sheeting", "difficulty"),
-        "border_elapsed": border,
-        "border_jigs": _jig_display(border_jig_records),
-        "border_jig_records": border_jig_records,
-        # A skipped border and a border worked for no measurable time both sum
-        # to zero seconds, so nothing else in this dict can tell them apart.
-        # The lane state is carried explicitly, and every rendering of an
-        # absent lane keys off it. Either production lane can be absent: the
-        # diagram may have a field, a border, or both. Packing never is.
-        "border_skipped": _phase_of(phases, "border_sheeting", "state") == "skipped",
-        "field_skipped": _phase_of(phases, "field_sheeting", "state") == "skipped",
-        # Where each lane stands: not_started, running, paused, complete, or
-        # skipped. The card reads these to decide what the maker can still do -
-        # a finished lane is not somewhere to switch to, and a lane declared
-        # absent is not either.
-        "phase_states": {
-            name: _phase_of(phases, name, "state")
-            for name in ("field_sheeting", "border_sheeting", "packing")
-        },
+        "parts": part_rows,
+        "part_count": len(part_rows),
+        # THE OPENING PREPARATION, which belongs to the job and not to a lane.
+        # It used to be recorded against whichever lane came first, because
+        # that was the only place to put it - which made a border-only job's
+        # preparation look like field work.
+        "job_setup_elapsed": int((timing or {}).get("jobSetupSeconds") or 0),
+        # Single-piece compatibility, as above.
+        "field_design": field.get("design"),
+        "difficulty": field.get("difficulty"),
+        "field_elapsed": field.get("elapsed") or 0,
+        "field_jigs": field.get("jigs") or "",
+        "field_jig_records": field.get("jig_records") or [],
+        "field_skipped": not field.get("present", True),
+        "border_design": border.get("design"),
+        "border_difficulty": border.get("difficulty"),
+        "border_elapsed": border.get("elapsed") or 0,
+        "border_jigs": border.get("jigs") or "",
+        "border_jig_records": border.get("jig_records") or [],
+        "border_skipped": not border.get("present", True),
+        "field_setup_elapsed": field.get("setup_elapsed") or 0,
+        "field_production_elapsed": field.get("production_elapsed") or 0,
+        "border_setup_elapsed": border.get("setup_elapsed") or 0,
+        "border_production_elapsed": border.get("production_elapsed") or 0,
+        "field_cutting_elapsed": field.get("cutting_elapsed") or 0,
+        "border_cutting_elapsed": border.get("cutting_elapsed") or 0,
+        # Packing is the job's: the maker packs the finished job, not each
+        # piece separately, so it stays flat and is not inside `parts`.
         "packing_begun": _packing_begun(phases, packing),
-        # Packing can be worked out of turn, as an interruption of the
-        # sheeting, so the cards need to know two more things: is the packing
-        # timer the one running right now, and has packing been finished for
-        # good. Everything between those two — packing that has some time but
-        # is not running — shows up through packing_elapsed.
+        "packing_state": _phase_of(phases, "packing", "state"),
         "packing_running": _phase_of(phases, "packing", "state") == "running",
         "packing_finished": _phase_of(phases, "packing", "state") == "complete",
         "packing_elapsed": packing,
+        "cutting_elapsed": _cutting_seconds(timing),
         # WHAT THE MAKER IS DOING RIGHT NOW, read from the ledger rather than
-        # worked out from lane states. Setup and sheeting share a lane, so the
-        # lane cannot say which of them is going, and during a packing
-        # interruption the lane that is accruing is not the one the job is on.
+        # worked out from lane states. It names the piece as well as the lane,
+        # because "sheeting the border" stopped identifying the work the moment
+        # a job could have three of them. `part` is None for the two job-level
+        # phases: the opening setup and packing.
         "working_on": (
-            {"phase": open_segment["phase"], "activity": open_segment["activity"]}
+            {
+                "phase": open_segment["phase"],
+                "part": open_segment.get("partNumber"),
+                "activity": open_segment["activity"],
+            }
             if open_segment
             else None
         ),
         # Work being measured INSIDE that, with the main timer still running.
+        # Its piece comes from the segment it is inside, never from the caller.
         "cutting_now": (
-            {"parent_phase": open_contained["parentPhase"]} if open_contained else None
+            {
+                "parent_phase": open_contained["parentPhase"],
+                "part": open_contained.get("parentPartNumber"),
+            }
+            if open_contained
+            else None
         ),
-        # The last stretch of work, running or not — what a paused card's
+        # The last stretch of work, running or not - what a paused card's
         # Resume offers. Its lane may since have been finished or declared
         # absent, which the card checks before offering it.
         "last_work": (
-            {"phase": last_segment["phase"], "activity": last_segment["activity"]}
+            {
+                "phase": last_segment["phase"],
+                "part": last_segment.get("partNumber"),
+                "activity": last_segment["activity"],
+            }
             if last_segment
             else None
         ),
-        # The two halves of each sheeting lane, and the cutting contained in it.
-        "field_setup_elapsed": _activity_seconds(timing, "field_sheeting", "setup"),
-        "field_production_elapsed": _activity_seconds(timing, "field_sheeting", "production"),
-        "border_setup_elapsed": _activity_seconds(timing, "border_sheeting", "setup"),
-        "border_production_elapsed": _activity_seconds(timing, "border_sheeting", "production"),
-        "field_cutting_elapsed": _cutting_seconds(timing, "field_sheeting"),
-        "border_cutting_elapsed": _cutting_seconds(timing, "border_sheeting"),
-        "cutting_elapsed": _cutting_seconds(timing),
         "general_notes": job.get("generalNotes"),
         "issues_encountered": job.get("issuesEncountered"),
-        "status": _legacy_status(job, phases),
+        "status": _legacy_status(job, phases, open_segment),
         "current_phase": _current_phase(job),
+        "current_part": _current_part(job, parts),
         "created_at": _iso_to_sqlite_datetime(job.get("createdAt")),
         "message_ts": job.get("cardMessageTs"),
         "dm_channel_id": job.get("dmChannelId"),
-        "total_elapsed": field + border + packing,
+        "total_elapsed": int((timing or {}).get("totalSeconds") or 0),
     }
+
+
+def _current_part(job, parts):
+    """The piece the cursor is on, as a number. None once the job is done."""
+    part_id = job.get("currentPartId")
+    if not part_id:
+        return None
+    for part in parts:
+        if part.get("id") == part_id:
+            return part["partNumber"]
+    return None
+
+
+def _lane_by_number(row, part_number, which):
+    """
+    One lane out of a row, by the piece's number.
+
+    `which` is "field" or "border". Returns an empty dict when the piece or the
+    lane is not there, so a caller reading a job that changed underneath gets
+    an absent lane rather than an exception.
+    """
+    for part in row.get("parts") or []:
+        if part.get("part") == part_number:
+            return part.get(which) or {}
+    return {}
 
 
 def _view_by_number(task_id):
@@ -608,28 +737,27 @@ def setup_database():
 
 
 def create_task(user_id, channel_id, customer_name, invoice_number, task_description, due_date,
-                design, difficulty, border_design=None, border_difficulty=None,
-                field_present=None):
+                design=None, difficulty=None, border_design=None, border_difficulty=None,
+                field_present=None, parts=None):
     """
     Create a job and return its number — the T-number shown on the card.
 
-    Creating it also starts its setup timer, in the same moment. Submitting the
-    intake form is the maker taking the job on, and the setup — fetching the
-    material, reading the drawings, finding the jig — is the first real work.
-    There is nothing left for a "Start" button to start.
+    Creating it also starts THE JOB'S setup timer, in the same moment.
+    Submitting the intake form is the maker taking the job on, and the setup —
+    reading the drawings, checking what was supplied, fetching the material —
+    is the first real work. There is nothing left for a "Start" button to
+    start. That setup is the JOB's: it is not charged to a lane, and on a job
+    drawn as several pieces it is not charged to the first one.
 
-    The diagram decides the shape. A job may have a field, a border, or both,
-    and at least one of them. A blank field design means the diagram has no
-    field: the job says so, and LMSA records the field lane as one that did not
-    happen rather than starting a lane nobody drew.
+    `parts` is the shape of the diagram: one entry per piece, each saying
+    whether it has a field, a border, or both. That is ALL the intake form
+    establishes — no designs, no difficulty, no jig, no cutting. Those are
+    asked for when the maker first enters that piece's lane, which is the
+    moment they are looking at it.
 
-    A border given here is what the diagram SAYS, not work that has started.
-    The border form still asks when its turn comes, prefilled with this, so a
-    value known at intake and a value discovered later end up in the same place.
-
-    No jig is sent. A maker filling this form in normally does not know the jig
-    yet; finding and testing it IS the setup, so the card asks for it at the
-    point it can actually be answered.
+    Omitting `parts` describes a single-piece job through the flat arguments,
+    which is what every caller did before pieces could be named. It builds one
+    real part like any other.
     """
     payload = {
         "ownerSlackUserId": user_id,
@@ -649,9 +777,7 @@ def create_task(user_id, channel_id, customer_name, invoice_number, task_descrip
         "dueDate": _due_date_to_iso(due_date),
         # The SHAPE is stated, never inferred from whether a design was typed.
         # A caller that does not say has a field, which is every job the
-        # tracker made before a border could stand on its own; the intake form
-        # says so explicitly because its own copy tells the maker that leaving
-        # a part blank means the diagram does not have it.
+        # tracker made before a border could stand on its own.
         "fieldPresent": True if field_present is None else bool(field_present),
         "fieldDesignName": design,
         "fieldDifficulty": difficulty,
@@ -660,6 +786,14 @@ def create_task(user_id, channel_id, customer_name, invoice_number, task_descrip
         "announceChannelId": channel_id,
         "actor": f"slack:{user_id}",
     }
+    if parts:
+        payload["parts"] = [
+            {
+                "fieldPresent": bool(part.get("field")),
+                "borderPresent": bool(part.get("border")),
+            }
+            for part in parts
+        ]
     data = _call("POST", "/jobs", payload, operation="create_task")
     return data["job"]["jobNumber"]
 
@@ -693,7 +827,7 @@ def get_task(task_id):
     return row
 
 
-def start_work(task_id, phase=None, activity="production"):
+def start_work(task_id, phase=None, activity="production", part=None):
     """
     Move the maker onto a piece of work and start timing it.
 
@@ -706,7 +840,10 @@ def start_work(task_id, phase=None, activity="production"):
     It never finishes anything. The work being left is paused, with everything
     it has recorded intact.
 
-    `phase` defaults to the lane the job is on, which is what Resume wants.
+    `phase` defaults to the lane the job is on, and `part` to the piece the
+    cursor is on, which together are what Resume wants. A lane needs a piece;
+    the two job-level phases - the opening setup and packing - take none.
+
     Returns "started", or the reason it could not, so the handler can say so.
     A second click, or the same click delivered twice, reports "started": the
     timer is running, which is what the maker asked for.
@@ -718,9 +855,17 @@ def start_work(task_id, phase=None, activity="production"):
     target = phase or row["current_phase"]
     if target == "completed":
         return "job_not_open"
+    # A lane always belongs to a piece. Defaulting to the cursor's piece is
+    # what makes Resume mean "carry on where I was" rather than "carry on
+    # somewhere on this job".
+    if target in ("field_sheeting", "border_sheeting"):
+        target_part = part if part is not None else row.get("current_part")
+    else:
+        target_part = None
     try:
         _call("POST", f"/jobs/{view['job']['id']}/segments/start", {
             "phase": target,
+            "partNumber": target_part,
             "activity": activity,
             "actor": f"slack:{row['user_id']}",
             "interrupting": True,
@@ -826,9 +971,9 @@ def stop_cutting(task_id):
     return "stopped"
 
 
-def complete_task(task_id):
+def complete_task(task_id, phase=None, part=None):
     """
-    Finish the current phase, closing any timer still running on it.
+    Finish one lane, closing any timer still running on it.
 
     Returns "completed", or the reason it could not. The one refusal a maker
     can genuinely cause is "another_phase_running" — pressing Complete Phase
@@ -840,12 +985,17 @@ def complete_task(task_id):
     if resolved is None:
         return None
     view, row = resolved
-    phase = row["current_phase"]
-    if phase == "completed":
+    target = phase or row["current_phase"]
+    if target == "completed":
         return "completed"
+    if target in ("field_sheeting", "border_sheeting"):
+        target_part = part if part is not None else row.get("current_part")
+    else:
+        target_part = None
     try:
         _call("POST", f"/jobs/{view['job']['id']}/phases/complete", {
-            "phase": phase,
+            "phase": target,
+            "partNumber": target_part,
             "actor": f"slack:{row['user_id']}",
         }, operation="complete_task")
     except TrackerRefused as refusal:
@@ -857,7 +1007,7 @@ def complete_task(task_id):
     return "completed"
 
 
-def _advance_cursor(job_id, phase, actor, operation):
+def _advance_cursor(job_id, phase, actor, operation, part=None):
     """
     Move the job's workflow cursor onto the phase whose modal was just
     submitted. This is the only thing that advances it.
@@ -865,6 +1015,7 @@ def _advance_cursor(job_id, phase, actor, operation):
     try:
         _call("POST", f"/jobs/{job_id}/phase-cursor", {
             "phase": phase,
+            "partNumber": part,
             "actor": actor,
         }, operation=operation)
     except TrackerRefused as refusal:
@@ -875,22 +1026,25 @@ def _advance_cursor(job_id, phase, actor, operation):
             raise
 
 
-def move_to_border_phase(task_id, border_design, border_difficulty, border_jig=None,
-                         advance_cursor=True):
+def set_lane_details(task_id, phase, design, difficulty, jig=None, part=None):
     """
-    Record what the border modal collected, and usually move the cursor onto it.
+    Record what one lane on one piece IS - its design, its difficulty, and the
+    jig when the maker already knows it.
 
-    Two calls, because they are two different facts: what the maker typed, and
-    where the maker now is. Each carries its own idempotency key, so a
-    redelivered submission repeats neither. If the second call is the one that
-    fails, the cursor stays on field: pressing Complete re-opens this same
-    modal, and submitting it again finishes the move.
+    Asked on first entry to that lane, which is the moment the maker is looking
+    at that piece of the diagram. It used to be asked of the border only, in a
+    form reached by finishing the field; every lane is described the same way
+    now, and the piece is named because a job drawn as three pieces has three
+    borders and they are not the same border.
 
-    advance_cursor=False keeps the first fact and drops the second. The card
-    offers this form whenever the maker already knows what the border is, so
-    that a border the diagram shows is not locked behind finishing the field -
-    but describing work is not the same as arriving at it, and the job stays
-    where it is until its turn genuinely comes.
+    Records the details and NOTHING else. It does not start the work and does
+    not move the job's cursor: the caller starts what the maker pressed for,
+    which is a separate fact with its own audit.
+
+    A lane previously recorded as absent is put back first, as its own audited
+    step - describing work that is on the record as not happening would be
+    refused anyway, silently, and the maker would be left believing the form
+    saved.
     """
     resolved = _row_for(task_id)
     if resolved is None:
@@ -898,38 +1052,32 @@ def move_to_border_phase(task_id, border_design, border_difficulty, border_jig=N
     view, row = resolved
     job_id = view["job"]["id"]
     actor = f"slack:{row['user_id']}"
+    target_part = part if part is not None else row.get("current_part")
 
-    # Filling this form in IS the statement that there is a border after all.
-    # A job previously marked "no border" is therefore put back first, as its
-    # own audited step: taking the decision back and describing the border are
-    # two different facts, and the history should show both. If the border
-    # cannot be put back - packing has already started - the refusal is raised
-    # rather than swallowed, because writing border details onto a lane that is
-    # still recorded as skipped would be refused anyway, silently, and the
-    # maker would be left believing the form saved.
-    if row.get("border_skipped"):
-        outcome = _post_border_skip_revert(job_id, actor, "move_to_border_phase_unskip")
+    which = "field" if phase == "field_sheeting" else "border"
+    lane = _lane_by_number(row, target_part, which)
+    if lane.get("present") is False and phase == "border_sheeting":
+        outcome = _post_border_skip_revert(job_id, actor, "set_lane_details_unskip", target_part)
         if outcome != "reverted":
             raise TrackerRefused(outcome)
 
     details = {
-        "phase": "border_sheeting",
-        "designName": border_design,
-        "difficulty": border_difficulty,
+        "phase": phase,
+        "partNumber": target_part,
+        "designName": design,
+        "difficulty": difficulty,
         "actor": actor,
     }
-    # The border modal's jig box is optional; sent only when something was
-    # typed. LMSA records it as the border phase's first jig — re-submitting
-    # this modal corrects that first value, it never stacks up copies.
-    if border_jig:
-        details["jigSizeText"] = border_jig
+    # The jig box is optional; sent only when something was typed. LMSA records
+    # it as that lane's first jig - re-submitting corrects that first value, it
+    # never stacks up copies.
+    if jig:
+        details["jigSizeText"] = jig
     try:
-        _call("POST", f"/jobs/{job_id}/phases/details", details, operation="move_to_border_phase")
+        _call("POST", f"/jobs/{job_id}/phases/details", details, operation="set_lane_details")
     except TrackerRefused as refusal:
         if refusal.reason != "already_processed":
             raise
-    if advance_cursor:
-        _advance_cursor(job_id, "border_sheeting", actor, "move_to_border_phase_cursor")
 
 
 def move_to_packing_phase(task_id):
@@ -959,7 +1107,7 @@ def move_to_packing_phase(task_id):
     return "moved"
 
 
-def skip_border_phase(task_id):
+def skip_border_phase(task_id, part=None):
     """
     Record that this job has no border.
 
@@ -981,6 +1129,7 @@ def skip_border_phase(task_id):
     view, row = resolved
     try:
         _call("POST", f"/jobs/{view['job']['id']}/phases/border-skip", {
+            "partNumber": part if part is not None else row.get("current_part"),
             "actor": f"slack:{row['user_id']}",
         }, operation="skip_border_phase")
     except TrackerRefused as refusal:
@@ -988,7 +1137,7 @@ def skip_border_phase(task_id):
             raise
 
 
-def _post_border_skip_revert(job_id, actor, operation):
+def _post_border_skip_revert(job_id, actor, operation, part=None):
     """
     Put a border that was marked "no border" back to undecided.
 
@@ -999,6 +1148,7 @@ def _post_border_skip_revert(job_id, actor, operation):
     """
     try:
         _call("POST", f"/jobs/{job_id}/phases/border-skip/revert", {
+            "partNumber": part,
             "actor": actor,
         }, operation=operation)
     except TrackerRefused as refusal:
@@ -1008,7 +1158,7 @@ def _post_border_skip_revert(job_id, actor, operation):
     return "reverted"
 
 
-def revert_border_skip(task_id):
+def revert_border_skip(task_id, part=None):
     """
     Take back a "no border" chosen by mistake, and SAY what happened.
 
@@ -1027,7 +1177,10 @@ def revert_border_skip(task_id):
         return None
     view, row = resolved
     return _post_border_skip_revert(
-        view["job"]["id"], f"slack:{row['user_id']}", "revert_border_skip"
+        view["job"]["id"],
+        f"slack:{row['user_id']}",
+        "revert_border_skip",
+        part if part is not None else row.get("current_part"),
     )
 
 
@@ -1108,7 +1261,7 @@ def delete_task(task_id):
             raise
 
 
-def add_jig(task_id, phase, jig_size):
+def add_jig(task_id, phase, jig_size, part=None):
     """
     Record another jig on the Field or Border phase — the Add Jig button.
 
@@ -1123,6 +1276,7 @@ def add_jig(task_id, phase, jig_size):
     try:
         _call("POST", f"/jobs/{view['job']['id']}/jigs", {
             "phase": phase,
+            "partNumber": part if part is not None else row.get("current_part"),
             "jigSizeText": jig_size,
             "actor": f"slack:{row['user_id']}",
         }, operation="add_jig")
@@ -1154,7 +1308,7 @@ def correct_jig(task_id, jig_id, jig_size):
             raise
 
 
-def update_task(task_id, customer, invoice, task_desc, design, difficulty, due_date):
+def update_task(task_id, customer, invoice, task_desc, design, difficulty, due_date, part=None):
     """Apply the Edit modal's values."""
     resolved = _row_for(task_id)
     if resolved is None:
@@ -1165,6 +1319,10 @@ def update_task(task_id, customer, invoice, task_desc, design, difficulty, due_d
             "customerName": customer,
             "invoiceNumber": invoice,
             "taskDescription": task_desc,
+            # The field design belongs to one piece's lane, so Edit says
+            # which. Part 1 by default, which for a job drawn as a single
+            # piece is the only answer there is.
+            "partNumber": part if part is not None else 1,
             "designName": design,
             "difficulty": difficulty,
             # No dueDateNotApplicable here on purpose. The Edit form has no
@@ -1232,6 +1390,9 @@ def get_completed_tasks():
     for entry in (data or {}).get("jobs", []):
         rows.append(_row({
             "job": entry["job"],
+            # The pieces come through too, so the export reads a multi-piece
+            # job as the several pieces it was rather than as its first one.
+            "parts": entry.get("parts") or [],
             "phases": entry.get("phases") or [],
             "jigs": entry.get("jigs") or [],
         }, entry.get("timing")))

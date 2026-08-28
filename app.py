@@ -58,123 +58,6 @@ app = App(
 # Defined once here because two different paths reach each of them, and a
 # change to one must not miss the other.
 
-def packing_modal_view(metadata, summary_text):
-    """
-    The Packing form.
-
-    Two paths reach it - the border phase finishing, and a job that turns out
-    to have no border at all - and they differ only in the few lines of summary
-    above the button. Defined here once so both say the same thing, and so a
-    change to the form cannot land on one path and miss the other.
-    """
-    return {
-        "type": "modal",
-        "callback_id": "trk_packing_modal",
-        "title": {"type": "plain_text", "text": "Packing"},
-        "submit": {"type": "plain_text", "text": "Go to the packing"},
-        "close": {"type": "plain_text", "text": "Cancel"},
-        "private_metadata": metadata,
-        "blocks": [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": summary_text}
-            }
-        ]
-    }
-
-
-def border_modal_view(task, metadata, summary_text, offer_no_border=True):
-    """
-    The border details form.
-
-    Two ways in, and the difference is only WHEN the maker knows. Finishing the
-    field opens it because that is when the border's turn arrives; the card
-    opens it whenever the maker already knows what the border is, so that a
-    border the diagram shows is not locked behind finishing a field. The form
-    itself is the same either way, which is the point of building it once.
-
-    "This job has no border" belongs to the first route only. Declaring the
-    border absent is a decision about the job's shape, and the moment for it is
-    the border's own turn - not while the field is still being worked.
-    """
-    view = {
-        "type": "modal",
-        "callback_id": "trk_border_modal",
-        "title": {"type": "plain_text", "text": "Border details"},
-        "submit": {"type": "plain_text", "text": "Save the border details"},
-        "close": {"type": "plain_text", "text": "Cancel"},
-        "private_metadata": metadata,
-        "blocks": [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": summary_text},
-            },
-                {
-                    "type": "input",
-                    "block_id": "border_design_block",
-                    "label": {"type": "plain_text", "text": "Border design"},
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "border_design",
-                        # Prefilled when the diagram already said what the
-                        # border is. Known at intake, worked now - and
-                        # still correctable here, which is the point of
-                        # asking again rather than assuming.
-                        "initial_value": task.get("border_design") or ""
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "border_diff_block",
-                    "label": {"type": "plain_text", "text": DIFFICULTY_LABEL_BORDER},
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "border_difficulty",
-                        "max_length": 2,
-                        "placeholder": {"type": "plain_text", "text": DIFFICULTY_HINT},
-                        "initial_value": task.get("border_difficulty") or ""
-                    }
-                },
-                # Usually a millimetre size, but "template" and split sizes
-                # are real entries too. Optional here because the border
-                # jig is often established during the border setup, and the
-                # card can take it then.
-                {
-                    "type": "input",
-                    "block_id": "border_jig_block",
-                    "optional": True,
-                    "label": {"type": "plain_text", "text": "Border jig or template"},
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "border_jig",
-                        "placeholder": {"type": "plain_text",
-                                        "text": "e.g. 49.6 or template - leave blank if not known yet"}
-                    }
-                },
-                # Some jobs genuinely have no border. This is the moment the
-                # maker knows that, so it is the moment they are asked - it
-                # is deliberately not on the intake form, where it would be
-                # one more thing to answer before the job can start.
-                {
-                    "type": "actions",
-                    "block_id": "no_border_block",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "This job has no border"},
-                            "action_id": "trk_no_border",
-                            "value": str(task["task_id"])
-                        }
-                    ]
-                }
-        ],
-    }
-    if not offer_no_border:
-        view["blocks"] = [b for b in view["blocks"]
-                          if b.get("block_id") != "no_border_block"]
-    return view
-
-
 def notes_modal_view(metadata, summary_text):
     """
     The last form: what happened, before the job closes.
@@ -290,53 +173,115 @@ FINISH_LABELS = {
     "packing": "Packing finished",
 }
 
-# What happens next once it is. A lane can be finished while the form that
-# follows it is still owed - a cancelled modal, or a "no border" taken back -
-# and then the button is not a finish at all, it is the way back to that form.
-NEXT_STEP_LABELS = {
-    "field_sheeting": "Enter border details",
-    "border_sheeting": "Go to packing",
-    "packing": "Finish the job",
-}
+def work_name(phase, activity, part=None):
+    """
+    What to call a piece of work, in the words the card uses.
+
+    `part` prefixes the piece when the job has more than one, because on a job
+    drawn as three pieces "Border sheeting" names three different jobs of work
+    and the maker has to be told which. On a single-piece job the prefix would
+    be noise - there is nothing to tell it apart from - so callers pass None.
+    """
+    name = WORK_NAMES.get((phase, activity), "Work")
+    if part is None:
+        return name
+    return f"Part {part} {name.lower()}"
 
 
-def work_name(phase, activity):
-    return WORK_NAMES.get((phase, activity), "Work")
+def part_label(task, part):
+    """
+    "Part 2", or nothing at all on a job drawn as one piece.
+
+    Every naming decision on the card goes through this, so a single-piece job
+    reads exactly as it did before pieces existed and a multi-piece one says
+    which piece throughout.
+    """
+    if part is None or (task.get("part_count") or 1) < 2:
+        return None
+    return part
 
 
-def work_value(task_id, phase=None, activity=None):
+def work_value(task_id, part=None, phase=None, activity=None):
     """
     What a button carries.
 
     A bare number still means "this job", which is what Edit, Delete and the
-    rest need and what every card posted by an earlier version of the tracker
-    sends. A button that moves the maker onto a particular piece of work names
-    it, so the handler never has to guess which one was meant.
+    rest need. A button that moves the maker onto a particular piece of work
+    names it in full - the job, the piece, the lane and the activity - so the
+    handler never has to guess which of a job's three borders was meant. The
+    two job-level phases, the opening setup and packing, carry an empty piece.
     """
     if phase is None:
         return str(task_id)
-    return f"{task_id}|{phase}|{activity}"
+    return f"{task_id}|{'' if part is None else part}|{phase}|{activity}"
 
 
 def read_work_value(raw):
-    """Read a button's value back. Returns (task_id, phase, activity)."""
-    parts = str(raw).split("|")
-    task_id = int(parts[0])
-    if len(parts) == 3:
-        return task_id, parts[1], parts[2]
-    return task_id, None, None
+    """
+    Read a button's value back. Returns (task_id, part, phase, activity).
+
+    Three shapes, because a card posted by an earlier version of the tracker is
+    still sitting in somebody's DM and still clickable:
+      "12"                            the job, nothing else
+      "12|border_sheeting|production"  a lane, before pieces were named
+      "12|2|border_sheeting|production"   a lane on a piece
+    The middle one answers None for the piece, which every caller then resolves
+    to the piece the cursor is on - the only piece such a card could have meant.
+    """
+    fields = str(raw).split("|")
+    task_id = int(fields[0])
+    if len(fields) == 4:
+        part = int(fields[1]) if fields[1] else None
+        return task_id, part, fields[2], fields[3]
+    if len(fields) == 3:
+        return task_id, None, fields[1], fields[2]
+    return task_id, None, None, None
 
 
-def lane_state(task, phase):
-    return (task.get("phase_states") or {}).get(phase)
+def lanes_of(task, part):
+    """One piece's two lanes, as {"field": {...}, "border": {...}}."""
+    for row in task.get("parts") or []:
+        if row.get("part") == part:
+            return row
+    return {}
 
 
-def lane_open(task, phase):
+def lane_of(task, part, phase):
+    """
+    One lane on one piece.
+
+    Packing is the job's and is not on a piece, so it answers from the flat
+    keys - the only lane that does.
+    """
+    if phase == "packing":
+        return {
+            "phase": "packing",
+            "part": None,
+            "present": True,
+            "state": task.get("packing_state"),
+            "design": None,
+            "difficulty": None,
+            "setup_elapsed": 0,
+            "production_elapsed": task.get("packing_elapsed") or 0,
+            "elapsed": task.get("packing_elapsed") or 0,
+            "cutting_elapsed": 0,
+            "jigs": "",
+            "jig_records": [],
+        }
+    which = "field" if phase == "field_sheeting" else "border"
+    return lanes_of(task, part).get(which) or {}
+
+
+def lane_state(task, part, phase):
+    return lane_of(task, part, phase).get("state")
+
+
+def lane_open(task, part, phase):
     """A lane still to be worked: not finished, and not declared absent."""
-    return lane_state(task, phase) not in ("complete", "skipped")
+    return lane_state(task, part, phase) not in ("complete", "skipped")
 
 
-def work_elapsed(task, phase, activity):
+def work_elapsed(task, part, phase, activity):
     """
     Seconds recorded against one piece of work.
 
@@ -344,10 +289,28 @@ def work_elapsed(task, phase, activity):
     total over again. Anything that adds a lane's two activities together
     depends on that.
     """
+    lane = lane_of(task, part, phase)
     if phase == "packing":
-        return (task["packing_elapsed"] or 0) if activity == "production" else 0
-    lane = "field" if phase == "field_sheeting" else "border"
-    return task[f"{lane}_{activity}_elapsed"] or 0
+        return (lane.get("production_elapsed") or 0) if activity == "production" else 0
+    return lane.get(f"{activity}_elapsed") or 0
+
+
+def every_work(task):
+    """
+    Every piece of work this job contains, in the order the maker reads it.
+
+    Each entry is (part, phase, activity). Packing comes last and belongs to
+    no piece. This is the one place the job's shape is enumerated, so nothing
+    downstream has to know how many pieces there are or which lanes they have.
+    """
+    out = []
+    for row in task.get("parts") or []:
+        part = row.get("part")
+        for phase in ("field_sheeting", "border_sheeting"):
+            out.append((part, phase, "setup"))
+            out.append((part, phase, "production"))
+    out.append((None, "packing", "production"))
+    return out
 
 
 def switch_destinations(task):
@@ -361,101 +324,164 @@ def switch_destinations(task):
     """
     here = task.get("working_on") or {}
     out = []
-    for phase, activity in (
-        ("field_sheeting", "setup"),
-        ("field_sheeting", "production"),
-        ("border_sheeting", "setup"),
-        ("border_sheeting", "production"),
-        ("packing", "production"),
-    ):
-        if phase == here.get("phase") and activity == here.get("activity"):
+    for part, phase, activity in every_work(task):
+        if (phase == here.get("phase") and activity == here.get("activity")
+                and part == here.get("part")):
             continue
-        if not lane_open(task, phase):
+        if not lane_open(task, part, phase):
             continue
-        # The border modal is where a border is described. Until it has been,
-        # there is no border to go and work on.
-        if phase == "border_sheeting" and not task.get("border_design"):
-            continue
+        # A lane is described on the way in now, not before it can be reached,
+        # so an undescribed border is somewhere to go - the form opens when the
+        # maker gets there. What is NOT somewhere to go is a lane the diagram
+        # does not have, which lane_open has already dropped.
         out.append({
+            "part": part,
             "phase": phase,
             "activity": activity,
-            "label": work_name(phase, activity),
+            "label": work_name(phase, activity, part_label(task, part)),
             "blurb": WORK_BLURBS[(phase, activity)],
         })
     return out
 
 
-def other_work_buttons(task, already_offered=()):
+def other_work_rows(task, already_offered=()):
     """
-    Every other piece of work on this job the maker may move to, as buttons.
+    The rest of the job, grouped the way the diagram is: one row per piece.
 
-    The job is not a wizard. A maker preparing a field may need the border
-    first, may come back, may pack in between - and none of that finishes what
-    they moved away from. switch_destinations() already knows which work is
-    legitimately available, so this simply puts each one on the card instead of
-    behind a form: the press IS the choice, and a button that says "Start
+    The job is not a wizard. A maker preparing Part 1's field may need Part 2's
+    border first, may come back, may pack in between - and none of that
+    finishes what they moved away from. Each row is that piece's available
+    work, as buttons: the press IS the choice, and a button that says "Start
     border setup" needs no screen to explain itself.
 
-    The lane the job's cursor is on leads, because after a packing interruption
-    "back to the sheeting that is waiting" is the common move.
+    Grouped per piece for two reasons, one of them structural. Reading: three
+    pieces' worth of buttons in one strip is a wall the maker has to parse.
+    And Slack requires an action_id to be unique WITHIN ITS BLOCK - Part 1's
+    field sheeting and Part 2's field sheeting share an id, so side by side in
+    one block the card would not render at all. A block per piece makes the ids
+    unique by construction, with no per-piece id space to invent.
+
+    Returns [(heading or None, [buttons])].
     """
     task_id = task["task_id"]
-    cursor = task["current_phase"]
-    buttons = []
+    cursor_phase = task["current_phase"]
+    cursor_part = task.get("current_part")
+    multi = (task.get("part_count") or 1) > 1
+    here = task.get("working_on") or {}
+
+    by_part = {}
     for destination in switch_destinations(task):
-        phase, activity = destination["phase"], destination["activity"]
+        part, phase, activity = destination["part"], destination["phase"], destination["activity"]
         # The row above already offers the forward move out of a setup, and
         # the way back onto a paused lane. Repeating either here would be the
         # same press twice, which reads as two different things to do.
-        if work_value(task_id, phase, activity) in already_offered:
+        if work_value(task_id, part, phase, activity) in already_offered:
             continue
-        leading = phase == cursor and activity == "production" and phase != (
-            (task.get("working_on") or {}).get("phase")
+        # The lane the job's cursor is on leads, because after a packing
+        # interruption "back to the sheeting that is waiting" is the common
+        # move.
+        leading = (
+            phase == cursor_phase
+            and part == cursor_part
+            and activity == "production"
+            and not (phase == here.get("phase") and part == here.get("part"))
         )
-        label = work_name(phase, activity)
-        if leading and work_elapsed(task, phase, activity):
-            label = "Back to " + label.lower()
-        buttons.append(_start_button(
-            label, task_id, phase, activity, style="primary" if leading else None,
+        label = work_name(phase, activity, part_label(task, part))
+        if leading and work_elapsed(task, part, phase, activity):
+            label = "Back to " + label[0].lower() + label[1:]
+        by_part.setdefault(part, []).append(_start_button(
+            label, task_id, part, phase, activity, style="primary" if leading else None,
         ))
-    return buttons
+
+    rows = []
+    for part in sorted(by_part, key=lambda p: (p is None, p or 0)):
+        if part is None:
+            heading = "*The job* - packing" if multi else None
+        else:
+            heading = f"*Part {part}*  {_part_shape(task, part)}" if multi else None
+        rows.append((heading, by_part[part]))
+    return rows
 
 
-def border_details_button(task):
+def _part_shape(task, part):
     """
-    Describe the border before its turn comes.
+    One piece's lanes in a few words - "field done · border 1h 12m".
 
-    A border the diagram shows but nobody has described yet cannot be worked -
-    there is nothing to work on. That was fine while the border was always
-    reached by finishing the field, and wrong now: the field is not a gate, and
-    a maker who knows what the border is should be able to say so and go and do
-    it. Opening the form from here records the details WITHOUT moving the
-    job's cursor; finishing the field still moves it, exactly as before.
+    Sits above that piece's buttons so the maker can see where a piece stands
+    without reading the time table further down. Short on purpose: it is a
+    signpost, not a report.
     """
-    if not lane_open(task, "border_sheeting"):
-        return None
-    if task.get("border_design"):
-        return None
-    if task.get("border_skipped"):
-        return None
-    return _button("Add border details", "trk_border_details", work_value(task["task_id"]))
+    bits = []
+    for phase, name in (("field_sheeting", "field"), ("border_sheeting", "border")):
+        lane = lane_of(task, part, phase)
+        if not lane.get("present", True):
+            continue
+        state = lane.get("state")
+        if state == "complete":
+            bits.append(name + " done")
+        elif state == "running":
+            bits.append(name + " running")
+        elif lane.get("elapsed"):
+            bits.append(name + " " + database.format_duration(lane["elapsed"]))
+        else:
+            bits.append(name + " not started")
+    return "  ·  ".join(bits)
+
+
+def other_work_buttons(task, already_offered=()):
+    """Every other-work button, flattened - for the callers that only count them."""
+    return [button for _, row in other_work_rows(task, already_offered) for button in row]
+
+
+def lane_needs_details(task, part, phase):
+    """
+    Whether this lane still has to be described before it can be worked.
+
+    A design and a difficulty are asked for on FIRST ENTRY to a lane, which is
+    the moment the maker is looking at that piece. Before pieces existed the
+    border was described in a form reached by finishing the field; now every
+    lane is described the same way, on the way in.
+    """
+    lane = lane_of(task, part, phase)
+    if not lane.get("present", True):
+        return False
+    if lane.get("state") in ("complete",):
+        return False
+    return not lane.get("design")
 
 
 def resume_target(task):
     """
     What Resume means on a paused card: the last thing the maker was doing.
 
+    Returns (part, phase, activity), or None when there is nothing to resume.
+
     Read from the ledger rather than assumed, because the last thing they were
     doing is not always the lane the job is on - a maker who stopped packing
-    mid-field is paused on the packing. If that work has since been finished or
-    declared absent, the lane the job is on is the honest fallback.
+    mid-field is paused on the packing. Two fallbacks follow, in the order a
+    maker would think of them: the lane the cursor is on, and then the first
+    unfinished work anywhere on the job. The last of those matters now that a
+    job can have several pieces - the cursor's own lane may be finished while
+    Part 3 has not been touched, and answering None there would leave a paused
+    card with nothing to press.
+
+    The opening setup is deliberately not a resume target. It belongs to the
+    job rather than to a lane, it is done once at the start, and offering to
+    resume it after the sheeting has begun would invite time onto a stage the
+    job has left.
     """
     last = task.get("last_work")
-    if last and lane_open(task, last["phase"]):
-        return last["phase"], last["activity"]
-    cursor = task["current_phase"]
-    if cursor != "completed" and lane_open(task, cursor):
-        return cursor, "production"
+    if last and last["phase"] != "job_setup" and lane_open(task, last.get("part"), last["phase"]):
+        return last.get("part"), last["phase"], last["activity"]
+
+    cursor_phase = task["current_phase"]
+    cursor_part = task.get("current_part")
+    if cursor_phase != "completed" and lane_open(task, cursor_part, cursor_phase):
+        return cursor_part, cursor_phase, "production"
+
+    for part, phase, activity in every_work(task):
+        if activity == "production" and lane_open(task, part, phase):
+            return part, phase, activity
     return None
 
 
@@ -513,13 +539,20 @@ START_ACTION_IDS = {
 }
 
 
-def _start_button(text, task_id, phase, activity, style=None):
-    """A button that opens a piece of work and starts timing it."""
+def _start_button(text, task_id, part, phase, activity, style=None):
+    """
+    A button that opens a piece of work and starts timing it.
+
+    Five action ids, one per lane-and-activity, whatever the job's shape. They
+    stay unique because each piece's buttons live in their OWN actions block -
+    Slack scopes an action_id to its block - so a job drawn as ten pieces needs
+    no ids that a job drawn as two did not. The value carries which piece.
+    """
     action_id = START_ACTION_IDS.get(
         (phase, activity),
         "trk_start_setup" if activity == "setup" else "trk_start_production",
     )
-    return _button(text, action_id, work_value(task_id, phase, activity), style=style)
+    return _button(text, action_id, work_value(task_id, part, phase, activity), style=style)
 
 
 def _jig_button(task):
@@ -530,65 +563,59 @@ def _jig_button(task):
     because a jig that was genuinely used stays used. The wording changes
     because "Add" reads as a second one, and the first time there is nothing to
     add to.
+
+    Offered only while the maker is ON a lane, because the jig belongs to the
+    lane being worked and a card that is not on one has nothing to attach it to.
     """
-    has_jig = bool(task.get("field_jigs") or task.get("border_jigs"))
+    here = task.get("working_on") or {}
+    if here.get("phase") not in ("field_sheeting", "border_sheeting"):
+        return None
+    lane = lane_of(task, here.get("part"), here["phase"])
     return _button(
-        "Add jig" if has_jig else "Set jig / template",
+        "Add jig" if lane.get("jigs") else "Set jig / template",
         "trk_add_jig",
-        work_value(task["task_id"]),
+        work_value(task["task_id"], here.get("part"), here["phase"], "production"),
     )
 
 
-def _finish_button(task):
+def _finish_button(task, part, phase):
     """
-    The one press that says a lane is done - or, once it is, the way on to the
-    form that follows it.
+    The one press that says a lane is done.
 
-    Nothing else on the card finishes anything, and this is deliberately not
+    Nothing else on the card finishes anything, and it is deliberately not
     offered until the lane has some sheeting time on it: straight out of setup
     the forward move is to START the sheeting, not to declare it over.
     """
-    cursor = task["current_phase"]
-    if cursor == "completed":
-        return None
-    if lane_state(task, cursor) == "complete":
-        # Finished already; what is owed is the form that comes next.
-        return _button(NEXT_STEP_LABELS[cursor], "trk_complete_task", work_value(task["task_id"]),
-                       style="primary")
-    if not lane_open(task, cursor):
+    if not lane_open(task, part, phase):
         return None
     here = task.get("working_on") or {}
-    on_it_now = here.get("phase") == cursor and here.get("activity") == "production"
+    on_it_now = (
+        here.get("phase") == phase
+        and here.get("part") == part
+        and here.get("activity") == "production"
+    )
     # Straight out of setup there is nothing to declare finished, so the
     # forward move is to START the sheeting. Once it has started - this
     # instant, not once a minute has accrued - finishing it is a real choice.
-    if not on_it_now and work_elapsed(task, cursor, "production") <= 0:
+    if not on_it_now and work_elapsed(task, part, phase, "production") <= 0:
         return None
-    label = FINISH_LABELS[cursor]
-    # Pause, always. Naming a button that is not there is how a maker gets sent
-    # looking for one, and every attempt to name the OTHER move has needed this
-    # line to work out what the card ended up showing - first Switch work,
-    # which is not on a packing card, then the other-work row, which is empty
-    # once every other lane is done. Pause is on every card that can offer a
-    # finish, so it needs no working out, and the other work is visible on the
-    # card anyway for the maker who wants it.
-    leave_unfinished = "Pause"
+    named = work_name(phase, "production", part_label(task, part))
+    label = FINISH_LABELS[phase] if part_label(task, part) is None else named + " finished"
     return _button(
         label,
         "trk_complete_task",
-        work_value(task["task_id"]),
+        work_value(task["task_id"], part, phase, "production"),
         confirm={
-            "title": {"type": "plain_text", "text": label + "?"},
+            "title": {"type": "plain_text", "text": "Finished?"},
             # Slack renders a confirmation's text as PLAIN TEXT. Asterisks
             # meant as emphasis are printed, so the maker read "*field
             # sheeting*" with the asterisks in it.
             "text": {
                 "type": "plain_text",
                 "text": (
-                    "This closes the " + work_name(cursor, "production").lower() +
-                    " for good and moves the job on.\n\n"
-                    "Still something to do on it? Use " + leave_unfinished + " instead - that "
-                    "leaves it unfinished and you can come back."
+                    "This closes " + named[0].lower() + named[1:] + " for good.\n\n"
+                    "Still something to do on it? Use Pause instead - that leaves it "
+                    "unfinished and you can come back."
                 ),
             },
             "confirm": {"type": "plain_text", "text": "Yes, it is finished"},
@@ -597,25 +624,14 @@ def _finish_button(task):
     )
 
 
-def lane_finish_is_new(task):
-    """
-    Whether this press is actually finishing a lane, or only reopening a form.
-
-    The finish button carries two jobs (see NEXT_STEP_LABELS): it closes a
-    lane, and once the lane is closed it becomes the way back to the form that
-    lane still owes - after a cancelled modal, or a "no border" taken back.
-    Only the first is something that happened; the second is a maker returning
-    to paperwork.
-
-    The team channel hears about the first only. Announcing both put "Field
-    sheeting finished" in the channel twice, two minutes apart, with identical
-    figures, for a lane that was finished once - which reads as the field
-    having been done again.
-
-    Same test the button itself uses to decide its label, so what the card
-    calls the press and whether the channel hears about it cannot drift apart.
-    """
-    return lane_state(task, task["current_phase"]) != "complete"
+def job_is_finishable(task):
+    """Every lane on every piece is done or was never there, and packing too."""
+    for part, phase, activity in every_work(task):
+        if activity != "production":
+            continue
+        if lane_open(task, part, phase):
+            return False
+    return True
 
 
 def delete_still_applies(task):
@@ -623,23 +639,17 @@ def delete_still_applies(task):
     Whether this job could still be one that should never have been entered.
 
     Delete is that correction, and it is only honest while nothing has been
-    made yet. "Setup" alone does not say so: a BORDER's setup can be reached
-    with the field worked and finished behind it, and offering to take the job
-    off the list there put a red button beside several hours of real labour.
-
-    So the test is what the job has actually produced, not which lane it
-    happens to sit on. Naming the field as "the first lane" was true only while
-    every job began with one; a border-only job starts on its border, and the
-    old test hid Delete from it entirely - leaving a maker who entered the
-    wrong job unable to take it off their list at all.
-
-    Nothing produced anywhere, and no lane declared finished: that is a job
-    that could still be one that should never have been entered.
+    made yet. The test is what the job has actually PRODUCED, across every
+    piece of it - not which lane it happens to sit on, and not whether the
+    opening setup has run, because reading the diagram and discovering it is
+    the wrong job is exactly when a maker needs this button.
     """
-    for phase in ("field_sheeting", "border_sheeting", "packing"):
-        if work_elapsed(task, phase, "production"):
+    for part, phase, activity in every_work(task):
+        if activity != "production":
+            continue
+        if work_elapsed(task, part, phase, "production"):
             return False
-        if lane_state(task, phase) == "complete":
+        if lane_state(task, part, phase) == "complete":
             return False
     return True
 
@@ -667,23 +677,49 @@ def _delete_button(task_id):
 
 
 def card_actions(task):
-    """The buttons, chosen by what the maker is actually able to do next."""
+    """
+    What the maker can do with the work they are HOLDING.
+
+    Only that. Everything else on the job is a row of its own below, one per
+    piece, so this strip stays short enough to read at a bench.
+    """
     task_id = task["task_id"]
     here = task.get("working_on")
     cutting = task.get("cutting_now")
-    cursor = task["current_phase"]
     buttons = []
 
+    if here and here["phase"] == "job_setup":
+        # Getting the job ready. The forward move is into the first piece of
+        # work the diagram has; everything else is in the rows below.
+        first = next(
+            ((p, ph) for p, ph, act in every_work(task)
+             if act == "production" and lane_open(task, p, ph)),
+            None,
+        )
+        if first:
+            part, phase = first
+            buttons.append(_start_button(
+                "Start " + work_name(phase, "setup", part_label(task, part)).lower(),
+                task_id, part, phase, "setup", style="primary",
+            ))
+        buttons.append(_button("Pause setup", "trk_stop_task", work_value(task_id)))
+        buttons.append(_button("Edit details", "trk_edit_task", work_value(task_id)))
+        if delete_still_applies(task):
+            buttons.append(_delete_button(task_id))
+        return buttons
+
     if here and here["activity"] == "setup":
-        # Setting up. The forward move is the sheeting itself, and this is the
-        # moment the jig becomes known, so both are on the card. Everything
-        # else on the job is reachable from the row below.
+        # Setting a lane up. The forward move is the sheeting itself, and this
+        # is the moment the jig becomes known, so both are on the card.
+        part = here.get("part")
         buttons.append(_start_button(
-            "Start " + work_name(here["phase"], "production").lower(),
-            task_id, here["phase"], "production", style="primary",
+            "Start " + work_name(here["phase"], "production", part_label(task, part)).lower(),
+            task_id, part, here["phase"], "production", style="primary",
         ))
         buttons.append(_button("Pause setup", "trk_stop_task", work_value(task_id)))
-        buttons.append(_jig_button(task))
+        jig = _jig_button(task)
+        if jig:
+            buttons.append(jig)
         buttons.append(_button("Edit details", "trk_edit_task", work_value(task_id)))
         if delete_still_applies(task):
             buttons.append(_delete_button(task_id))
@@ -691,67 +727,72 @@ def card_actions(task):
 
     if here:
         # Working. Pause, measure cutting alongside it, or say the lane is
-        # finished. Moving to other work is the row below, not a form.
+        # finished. Moving to other work is the rows below, not a form.
+        part = here.get("part")
         if cutting:
             buttons.append(_button("Stop cutting", "trk_stop_cutting", work_value(task_id),
                                    style="primary"))
         buttons.append(_button("Pause", "trk_stop_task", work_value(task_id)))
         if not cutting and here["phase"] != "packing" and here["activity"] == "production":
-            buttons.append(_button("Start cutting", "trk_start_cutting", work_value(task_id)))
-        buttons.append(_jig_button(task))
-        if here["phase"] == cursor:
-            finish = _finish_button(task)
-            if finish:
-                buttons.append(finish)
+            # Cutting is measured inside THIS piece's sheeting, and takes its
+            # piece from the segment it is inside - so the value names the work
+            # it is happening in rather than asking the maker again.
+            buttons.append(_button(
+                "Start cutting", "trk_start_cutting",
+                work_value(task_id, part, here["phase"], "production"),
+            ))
+        jig = _jig_button(task)
+        if jig:
+            buttons.append(jig)
+        finish = _finish_button(task, part, here["phase"])
+        if finish:
+            buttons.append(finish)
         return buttons
 
     # Nothing is being timed.
     resume = resume_target(task)
     if resume:
+        part, phase, activity = resume
         untouched = (
-            not work_elapsed(task, resume[0], "setup")
-            and not work_elapsed(task, resume[0], "production")
+            not work_elapsed(task, part, phase, "setup")
+            and not work_elapsed(task, part, phase, "production")
         )
-        if untouched and resume[0] != "packing":
-            # A sheeting lane nobody has started yet. Setup comes first, the
-            # same way it does on the field, and the sheeting is right beside
-            # it for a job that needs no preparing.
+        if untouched and phase != "packing":
+            # A sheeting lane nobody has started yet. Setup comes first, and
+            # the sheeting is right beside it for a lane that needs no
+            # preparing.
             buttons.append(_start_button(
-                "Start " + work_name(resume[0], "setup").lower(),
-                task_id, resume[0], "setup", style="primary",
+                "Start " + work_name(phase, "setup", part_label(task, part)).lower(),
+                task_id, part, phase, "setup", style="primary",
             ))
             buttons.append(_start_button(
-                "Start " + work_name(resume[0], "production").lower(),
-                task_id, resume[0], "production",
+                "Start " + work_name(phase, "production", part_label(task, part)).lower(),
+                task_id, part, phase, "production",
             ))
         else:
             # "Resume" only where there is something to resume; a lane with no
             # time on it is being started, whatever the ledger last recorded.
-            verb = "Resume" if work_elapsed(task, resume[0], resume[1]) else "Start"
+            verb = "Resume" if work_elapsed(task, part, phase, activity) else "Start"
+            named = work_name(phase, activity, part_label(task, part))
             buttons.append(_start_button(
-                verb + " " + work_name(*resume).lower(),
-                task_id, resume[0], resume[1], style="primary",
+                verb + " " + named[0].lower() + named[1:],
+                task_id, part, phase, activity, style="primary",
             ))
-            if resume[1] == "setup":
+            if activity == "setup":
                 buttons.append(_start_button(
-                    "Start " + work_name(resume[0], "production").lower(),
-                    task_id, resume[0], "production",
+                    "Start " + work_name(phase, "production", part_label(task, part)).lower(),
+                    task_id, part, phase, "production",
                 ))
-    buttons.append(_jig_button(task))
     buttons.append(_button("Edit details", "trk_edit_task", work_value(task_id)))
     # A job entered by mistake is as likely to be spotted on the paused card as
     # on the running one - the maker stops, looks, and sees it is the wrong job.
     if delete_still_applies(task):
         buttons.append(_delete_button(task_id))
-    finish = _finish_button(task)
-    if finish:
-        buttons.append(finish)
-    # A job marked "no border" can still turn out to need one. The way back
-    # stays open until packing is finished for good, and lives on the paused
-    # card because the correction is refused while a timer runs - a button that
-    # always refuses is worse than no button.
-    if cursor == "packing" and task.get("border_skipped") and not task.get("packing_finished"):
-        buttons.append(_button("Border after all", "trk_undo_no_border", work_value(task_id)))
+    # The one press that ends the job, offered only once there is nothing left
+    # unfinished anywhere on it.
+    if job_is_finishable(task) and task["current_phase"] != "completed":
+        buttons.append(_button("Finish the job", "trk_complete_task",
+                               work_value(task_id), style="primary"))
     return buttons
 
 
@@ -759,38 +800,40 @@ def _status_lines(task):
     """
     What the maker is doing, said plainly and first.
 
-    A working card names the work and how long it has been going. A paused card
-    says nothing is being timed, and what it was. During a packing interruption
-    it also says what is waiting, because "the field is paused, not finished"
-    is the fact a maker most needs and the one a status word cannot carry.
+    A RUNNING timer says it is running and does not print a number. Slack is
+    not a stopwatch: a card rendered at the moment work starts would read
+    "so far: 0s" and sit there saying it until something else redrew the card,
+    which reads as a timer that is not working. Paused and finished work shows
+    what it recorded, because those figures are final.
     """
     here = task.get("working_on")
-    cursor = task["current_phase"]
     if not here:
         last = task.get("last_work")
         lines = ["*Paused - nothing is being timed*"]
         if last:
+            if last["phase"] == "job_setup":
+                name = "Initial setup"
+                recorded = task.get("job_setup_elapsed") or 0
+            else:
+                name = work_name(last["phase"], last["activity"], part_label(task, last.get("part")))
+                recorded = work_elapsed(task, last.get("part"), last["phase"], last["activity"])
             lines.append(
-                "Last on " + work_name(last["phase"], last["activity"]).lower() + ", "
-                + database.format_duration(work_elapsed(task, last["phase"], last["activity"]))
-                + " recorded."
+                "Last on " + name[0].lower() + name[1:] + ", "
+                + database.format_duration(recorded) + " recorded."
             )
         return lines
 
-    name = work_name(here["phase"], here["activity"])
-    lines = ["*Working on: " + name + "*"]
+    if here["phase"] == "job_setup":
+        # The opening preparation, which is the JOB's - not the first piece's.
+        return [
+            "*Initial setup - running*",
+            "_Reading the drawings, checking what came in, getting the material together._",
+        ]
+
+    name = work_name(here["phase"], here["activity"], part_label(task, here.get("part")))
+    lines = ["*" + name + " - running*"]
     if here["activity"] == "setup":
-        lines.append("_Getting the job ready to sheet - material, drawings, and the jig._")
-    if here["phase"] != cursor and cursor != "completed":
-        waiting = work_name(cursor, "production").lower()
-        lines.append(
-            "_" + waiting.capitalize() + " is paused while you do this. Its time is safe, "
-            "nothing about it is finished, and the job is still on it._"
-        )
-    lines.append(
-        name + " so far: *"
-        + database.format_duration(work_elapsed(task, here["phase"], here["activity"])) + "*"
-    )
+        lines.append("_Getting this part ready to sheet - material, drawings, and the jig._")
     cutting = task.get("cutting_now")
     if cutting:
         inside = work_name(cutting["parent_phase"], "production").lower()
@@ -805,6 +848,10 @@ def _fields(task):
     """
     The job itself. Two columns, so it reads as a small label rather than
     another paragraph, and only the things that have an answer.
+
+    Designs and jigs are NOT here on a job with several pieces: each piece has
+    its own, and six of them in a two-column grid is a table pretending to be a
+    label. They live under that piece in the time section instead.
     """
     pairs = []
     # Only when the header could not hold it - otherwise it would be on the
@@ -812,18 +859,23 @@ def _fields(task):
     if customer_was_trimmed(task):
         pairs.append(("Customer", task["customer_name"]))
     pairs += [("Job", task["task_description"]), ("Invoice", task["invoice_number"])]
-    if task.get("field_design"):
-        pairs.append(("Field design", task["field_design"]))
-    if task.get("difficulty"):
-        pairs.append(("Field difficulty", task["difficulty"]))
-    if task.get("border_design"):
-        pairs.append(("Border design", task["border_design"]))
-    if task.get("border_difficulty"):
-        pairs.append(("Border difficulty", task["border_difficulty"]))
-    if task.get("field_jigs"):
-        pairs.append(("Field jig", task["field_jigs"]))
-    if task.get("border_jigs"):
-        pairs.append(("Border jig", task["border_jigs"]))
+    if (task.get("part_count") or 1) > 1:
+        pairs.append(("Parts", str(task["part_count"])))
+    else:
+        lane = lane_of(task, 1, "field_sheeting")
+        border = lane_of(task, 1, "border_sheeting")
+        if lane.get("design"):
+            pairs.append(("Field design", lane["design"]))
+        if lane.get("difficulty"):
+            pairs.append(("Field difficulty", lane["difficulty"]))
+        if border.get("design"):
+            pairs.append(("Border design", border["design"]))
+        if border.get("difficulty"):
+            pairs.append(("Border difficulty", border["difficulty"]))
+        if lane.get("jigs"):
+            pairs.append(("Field jig", lane["jigs"]))
+        if border.get("jigs"):
+            pairs.append(("Border jig", border["jigs"]))
     pairs.append(("Due", due_date_display(task)))
     # Slack renders at most ten fields in a section.
     return [{"type": "mrkdwn", "text": "*" + label + "*\n" + str(value)}
@@ -944,7 +996,35 @@ def read_difficulty(typed):
     return str(value), None
 
 
-def _lane_lines(task, phase):
+PART_COUNT_ERROR = "How many parts? A whole number, 1 or more."
+
+
+def read_part_count(typed):
+    """
+    How many pieces the diagram is drawn as.
+
+    A whole number, at least one, at most two digits. THERE IS NO BUSINESS
+    MAXIMUM: two digits is the width of the box, not a rule about how many
+    pieces a job may have, and if a job ever needs more the limit to change is
+    that width.
+
+    Returns (count, error). A blank box means one piece, because that is what
+    the field is pre-filled with and what most jobs are.
+    """
+    raw = (typed or "").strip()
+    if not raw:
+        return 1, None
+    if not all(character in "0123456789" for character in raw):
+        return None, PART_COUNT_ERROR
+    if len(raw) > 2:
+        return None, PART_COUNT_ERROR
+    value = int(raw)
+    if value < 1:
+        return None, PART_COUNT_ERROR
+    return value, None
+
+
+def _lane_lines(task, part, phase):
     """
     One lane's time, with its parts underneath in the shape they really have.
 
@@ -960,14 +1040,16 @@ def _lane_lines(task, phase):
     part underneath would say nothing.
     """
     here = task.get("working_on") or {}
-    on_this_lane = here.get("phase") == phase
-    setup = work_elapsed(task, phase, "setup")
-    production = work_elapsed(task, phase, "production")
+    on_this_lane = here.get("phase") == phase and here.get("part") == part
+    lane = lane_of(task, part, phase)
+    if not lane.get("present", True):
+        return ["*" + LANE_NAMES[phase] + "*  not on this part"]
+    setup = work_elapsed(task, part, phase, "setup")
+    production = work_elapsed(task, part, phase, "production")
     if not setup and not production and not on_this_lane:
         return []
 
-    label = LANE_NAMES[phase]
-    lines = ["*" + label + "*  " + database.format_duration(setup + production)]
+    lines = ["*" + LANE_NAMES[phase] + "*  " + database.format_duration(setup + production)]
     if phase == "packing":
         return lines
 
@@ -975,8 +1057,7 @@ def _lane_lines(task, phase):
         lines.append("•  Setup  " + database.format_duration(setup))
     if production or (on_this_lane and here.get("activity") == "production"):
         lines.append("•  Sheeting  " + database.format_duration(production))
-        lane = "field" if phase == "field_sheeting" else "border"
-        cutting = task.get(lane + "_cutting_elapsed") or 0
+        cutting = lane.get("cutting_elapsed") or 0
         if cutting:
             # Cutting is written under the sheeting it happened inside, never
             # as a line of its own, because it is time already counted. An en
@@ -984,23 +1065,46 @@ def _lane_lines(task, phase):
             # this one still prints where the card text is rendered outside
             # Slack.
             lines.append("     –  of which cutting  " + database.format_duration(cutting))
+    if lane.get("design") or lane.get("jigs"):
+        described = [bit for bit in (
+            lane.get("design"),
+            ("difficulty " + lane["difficulty"]) if lane.get("difficulty") else None,
+            ("jig " + lane["jigs"]) if lane.get("jigs") else None,
+        ) if bit]
+        lines.append("     " + "  ·  ".join(described))
     return lines
 
 
 def _time_lines(task, total_label="Total job time"):
     """
-    What has been recorded, lane by lane.
+    What has been recorded, piece by piece.
 
     A lane appears once there is something to say about it, so an early card is
-    short and a late one is complete.
+    short and a late one is complete. The pieces are headed only when there is
+    more than one - on a single-piece job "Part 1" is a heading with nothing to
+    distinguish it from.
     """
+    multi = (task.get("part_count") or 1) > 1
+    rows = []
+
+    setup = task.get("job_setup_elapsed") or 0
     here = task.get("working_on") or {}
-    rows = _lane_lines(task, "field_sheeting")
-    if task.get("border_skipped"):
-        rows.append("*Border*  no border on this job")
-    else:
-        rows += _lane_lines(task, "border_sheeting")
-    rows += _lane_lines(task, "packing")
+    if setup or here.get("phase") == "job_setup":
+        # The job's own preparation, above the pieces, because that is what it
+        # is: work on the job before any one piece of it.
+        rows.append("*Initial setup*  " + database.format_duration(setup))
+
+    for row in task.get("parts") or []:
+        part = row.get("part")
+        lane_rows = (_lane_lines(task, part, "field_sheeting")
+                     + _lane_lines(task, part, "border_sheeting"))
+        if not lane_rows:
+            continue
+        if multi:
+            rows.append("*Part " + str(part) + "*")
+        rows += lane_rows
+
+    rows += _lane_lines(task, None, "packing")
 
     # Nothing worked yet: the status line has already said what the maker is on
     # and how long for, and repeating it under a heading is three noughts and no
@@ -1012,90 +1116,18 @@ def _time_lines(task, total_label="Total job time"):
     ]
 
 
-def lane_report(task, phase):
-    """
-    One line saying how long a lane took and how that time was made up.
-
-    Used wherever a lane is announced as finished - the team channel, the form
-    that follows it, the closing summary - so those three can never disagree
-    about the same lane, and so "5h 12m" is never quietly a different 5h 12m in
-    two places.
-    """
-    if phase == "border_sheeting" and task.get("border_skipped"):
-        return "*Border*  no border on this job"
-    if phase == "field_sheeting" and task.get("field_skipped"):
-        return "*Field*  no field on this job"
-    return "\n".join(_lane_lines(task, phase))
-
-
-def job_summary_blocks(task, finished_by, general_notes, issues):
-    """
-    The closing summary posted to the team channel.
-
-    The same time lines the card showed all along, so a maker reading it
-    recognises the job they just worked. Cutting appears inside the lane it
-    happened in and never as a line of its own: it is time already counted, and
-    a separate entry would read as time on top of the job.
-    """
-    facts = [f"Invoice {task['invoice_number']}", task["task_description"]]
-    if task.get("field_jigs"):
-        facts.append("Field jig " + task["field_jigs"])
-    if task.get("border_jigs"):
-        facts.append("Border jig " + task["border_jigs"])
-
-    blocks = [
-        {
-            "type": "header",
-            "text": {"type": "plain_text", "text": header_text(task)},
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn",
-                     "text": "*Finished by <@" + finished_by + ">*\n" + "  ·  ".join(facts)},
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "\n".join(_time_lines(task))},
-        },
-    ]
-    # Notes and problems appear when there are some. A finished job that went
-    # fine used to end with "Notes / None / Anything go wrong? / None", which
-    # is four lines saying nothing and made every completion look like a form
-    # nobody filled in. The channel is for operational state; the full record
-    # is in the database either way.
-    written = (general_notes or "").strip()
-    if written and written.lower() != "none":
-        blocks.append({"type": "section",
-                       "text": {"type": "mrkdwn", "text": "*Notes*\n" + written}})
-    wrong = (issues or "").strip()
-    if wrong and wrong.lower() != "none":
-        blocks.append({"type": "section",
-                       "text": {"type": "mrkdwn", "text": "*Anything go wrong?*\n" + wrong}})
-    return blocks
-
-def border_route(task):
-    """
-    How THIS card reaches the border, in the words of a button that is on it.
-
-    Straight from a finished field the card offers the border's own starts.
-    After Border after all it does not: the maker is paused on packing, so
-    Resume packing is the forward move and the border is reached through Switch
-    work. Saying "start the border" there names a button that is not there.
-    """
-    for button in card_actions(task) + other_work_buttons(task):
-        if not (button.get("action_id") or "").startswith("trk_start_"):
-            continue
-        if "border_sheeting" in (button.get("value") or ""):
-            return "Start the border when you are ready."
-    return "The border is under *Other work on this job* when you are ready."
-
-
 def job_card(task, note=None):
     """
     The whole card. Returns (fallback text, blocks).
 
+    Read top to bottom it answers, in order: which job is this, what am I on,
+    what can I do with it, what else is on the job, and what has been recorded.
+    The buttons come BEFORE the reading matter - on a phone the job's details
+    and its times run well past a screen, and a maker wanting to pause or start
+    the cutting had to scroll past all of it while standing at a bench.
+
     `note` is a single line put at the top when something just happened that
-    the card alone would not explain - a jig recorded, a border put back.
+    the card alone would not explain.
     """
     task_id = task["task_id"]
     blocks = [{
@@ -1108,13 +1140,7 @@ def job_card(task, note=None):
         "type": "section",
         "text": {"type": "mrkdwn", "text": "\n".join(_status_lines(task))},
     })
-    # The buttons come BEFORE the reading matter. On a phone the job's
-    # details and its times run to about thirty lines, and a maker wanting
-    # to pause or start the cutting had to scroll past all of it - while
-    # standing at a bench, usually mid-task. Which job this is and what
-    # they are on stay above, because those say whether it is even the
-    # right card; the times and the rest of the job sit below, where
-    # reading is what a maker is doing anyway.
+
     actions = card_actions(task)
     if actions:
         blocks.append({
@@ -1122,47 +1148,61 @@ def job_card(task, note=None):
             "block_id": "task_actions_" + str(task_id),
             "elements": actions,
         })
-    # The rest of the job, as its own row. A maker is not walking a wizard:
+
+    # The rest of the job, one row per piece. A maker is not walking a wizard:
     # while the job is unfinished they can move between whatever work it
     # actually contains, and the card says so rather than hiding it behind a
-    # form. Its own block because an action_id is unique per block, and
-    # because "what else is on this job" is a different question from "what
-    # can I do with what I am holding".
-    offered = {b.get("value") for b in actions if (b.get("action_id") or "").startswith("trk_start_")}
-    elsewhere = other_work_buttons(task, offered)
-    describe_border = border_details_button(task)
-    if describe_border:
-        elsewhere.append(describe_border)
-    if elsewhere:
+    # form.
+    #
+    # Each piece gets its OWN actions block. That is not only for reading:
+    # Slack scopes an action_id to its block, and Part 1's field sheeting and
+    # Part 2's field sheeting share one - side by side in a single block the
+    # card would not render at all.
+    offered = {b.get("value") for b in actions
+               if (b.get("action_id") or "").startswith("trk_start_")}
+    rows = other_work_rows(task, offered)
+    if rows:
         blocks.append({
             "type": "context",
             "elements": [{"type": "mrkdwn",
                           "text": "*Other work on this job* - moving pauses what you are on "
                                   "and finishes nothing."}],
         })
-        blocks.append({
-            "type": "actions",
-            "block_id": "task_elsewhere_" + str(task_id),
-            "elements": elsewhere,
-        })
+        for index, (heading, buttons) in enumerate(rows, start=1):
+            if heading:
+                blocks.append({
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": heading}],
+                })
+            blocks.append({
+                "type": "actions",
+                "block_id": f"task_elsewhere_{index}_{task_id}",
+                "elements": buttons,
+            })
+
     times = _time_lines(task)
     if times:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(times)}})
     blocks.append({"type": "section", "fields": _fields(task)})
+
     footer = "Logged by <@" + task["user_id"] + ">"
-    on_setup = task.get("working_on") or {}
-    if on_setup.get("activity") == "setup":
+    here = task.get("working_on") or {}
+    if here.get("activity") == "setup":
         # A job starts timing its setup the moment it exists, and nothing
         # closes a timer left running overnight. Pause is already on the card;
         # this says, where the risk actually is, what it is for.
-        footer += "  ·  Pause setup if you stop working on it - you can pick it up again any time."
-    if other_work_buttons(task):
+        footer += "  ·  Pause if you stop working - you can pick it up again any time."
+    if rows:
         footer += "  ·  Moving to other work, or pausing, never finishes anything."
     blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]})
 
-    here = task.get("working_on")
-    summary = ("T-" + str(task_id) + ": " + work_name(here["phase"], here["activity"])
-               if here else "T-" + str(task_id) + ": paused")
+    if not here:
+        summary = "T-" + str(task_id) + ": paused"
+    elif here["phase"] == "job_setup":
+        summary = "T-" + str(task_id) + ": initial setup"
+    else:
+        summary = "T-" + str(task_id) + ": " + work_name(
+            here["phase"], here["activity"], part_label(task, here.get("part")))
     return summary, blocks
 
 
@@ -1383,6 +1423,19 @@ def track_command(ack, body, client):
                         "action_id": "due_date",
                         "placeholder": {"type": "plain_text", "text": DUE_DATE_HINT}
                     }
+                },
+                {
+                    "type": "input",
+                    "block_id": "parts_block",
+                    "label": {"type": "plain_text", "text": "Number of parts"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "part_count",
+                        "initial_value": "1",
+                        "max_length": 2,
+                    },
+                    "hint": {"type": "plain_text",
+                             "text": "How many pieces the diagram is drawn as."},
                 }
             ]
         }
@@ -1607,6 +1660,12 @@ def handle_step_1(ack,body,client,):
         ack(response_action="errors", errors={"date_block": due_date_error})
         return
 
+    part_count, part_count_error = read_part_count(
+        _typed(vals, "parts_block", "part_count"))
+    if part_count_error:
+        ack(response_action="errors", errors={"parts_block": part_count_error})
+        return
+
     # private_metadata is the only way to carry these across to the pushed
     # form, which arrives as a separate submission.
     step1_data = {
@@ -1615,95 +1674,80 @@ def handle_step_1(ack,body,client,):
         "invoice_number": invoice_number,
         "task_description": task_description,
         "due_date": due_date,
+        "part_count": part_count,
     }
 
-    # The second form asks what the diagram has on it. A job may be a field, a
-    # border, or both, so every box here is optional and the submission checks
-    # that at least one of them was answered. Asking for a field on a
-    # border-only job is how a lane nobody drew ends up on the record.
-    #
-    # No jig question here. A maker filling this in has just been handed the job
-    # and normally does not know the jig yet - finding and testing it is the
-    # setup. The card asks at the point it can actually be answered.
-    ack(response_action="push", view={
+    ack(response_action="push", view=step_2_view(step1_data))
+
+
+def step_2_view(step1_data):
+    """
+    Screen 2: WHAT WORK EXISTS, and nothing else.
+
+    One section per piece, each with a Field and a Border tick. That is the
+    whole form. It deliberately does not ask for designs, difficulty, jig or
+    cutting: the maker filling this in has just been handed the diagram and is
+    establishing the shape of the job. The details are asked for when they
+    first enter that piece's lane, which is the moment they are looking at it.
+
+    Checkboxes rather than a text box per lane, because the question is yes or
+    no and a tick answers it without the maker having to know that leaving a
+    box empty is how you say "there isn't one".
+    """
+    count = step1_data["part_count"]
+    blocks = [{
+        "type": "section",
+        "text": {"type": "mrkdwn",
+                 "text": "*What work is on each part?*\nTick what the diagram has. "
+                         "Every part needs at least one."},
+    }]
+    for number in range(1, count + 1):
+        # One piece per section. On a single-piece job the heading would be
+        # noise - there is nothing to tell it apart from - so it is left off.
+        if count > 1:
+            blocks.append({"type": "divider"})
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*Part {number}*"},
+            })
+        blocks.append({
+            "type": "input",
+            "block_id": f"part_{number}",
+            "optional": True,
+            "label": {"type": "plain_text",
+                      "text": "Work" if count == 1 else f"Part {number} work"},
+            "element": {
+                "type": "checkboxes",
+                "action_id": "lanes",
+                "options": [
+                    {"text": {"type": "plain_text", "text": "Field"}, "value": "field"},
+                    {"text": {"type": "plain_text", "text": "Border"}, "value": "border"},
+                ],
+            },
+        })
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn",
+                      "text": "Creating the job starts Initial setup and sends your work "
+                              "card in a DM."}],
+    })
+    return {
         "type": "modal",
         "callback_id": "trk_track_step_2",
         "title": {"type": "plain_text", "text": "New job - 2 of 2"},
         "submit": {"type": "plain_text", "text": "Create the job"},
         "close": {"type": "plain_text", "text": "Back"},
         "private_metadata": json.dumps(step1_data),
-        "blocks": [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn",
-                         "text": "*What is on the diagram?*\nFill in the Field, the Border, or "
-                                 "both."}
-            },
-            {"type": "divider"},
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "*Field*"}
-            },
-            {
-                "type": "input",
-                "block_id": "design",
-                "optional": True,
-                "label": {"type": "plain_text", "text": "Design"},
-                "element": {
-                    "type": "plain_text_input",
-                    "action_id": "val",
-                    "placeholder": {"type": "plain_text", "text": "e.g. Tivoli"},
-                },
-            },
-            {
-                "type": "input",
-                "block_id": "diff",
-                "optional": True,
-                "label": {"type": "plain_text", "text": "Difficulty"},
-                "element": {
-                    "type": "plain_text_input",
-                    "action_id": "difficulty",
-                    "max_length": 2,
-                    "placeholder": {"type": "plain_text", "text": DIFFICULTY_HINT},
-                },
-            },
-            {"type": "divider"},
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "*Border*"}
-            },
-            {
-                "type": "input",
-                "block_id": "border_design",
-                "optional": True,
-                "label": {"type": "plain_text", "text": "Design"},
-                "element": {
-                    "type": "plain_text_input",
-                    "action_id": "val",
-                    "placeholder": {"type": "plain_text", "text": "e.g. Greek Key"},
-                },
-            },
-            {
-                "type": "input",
-                "block_id": "border_diff",
-                "optional": True,
-                "label": {"type": "plain_text", "text": "Difficulty"},
-                "element": {
-                    "type": "plain_text_input",
-                    "action_id": "difficulty",
-                    "max_length": 2,
-                    "placeholder": {"type": "plain_text", "text": DIFFICULTY_HINT},
-                },
-            },
-            {
-                "type": "context",
-                "elements": [{"type": "mrkdwn",
-                              "text": "Creating the job starts Setup and sends your work card "
-                                      "in a DM."}]
-            },
-        ]
+        "blocks": blocks,
     }
-    )
+
+
+def read_lanes(values, number):
+    """Which lanes were ticked for one piece, as a set."""
+    block = values.get(f"part_{number}") or {}
+    chosen = (block.get("lanes") or {}).get("selected_options") or []
+    return {option.get("value") for option in chosen}
+
 
 def _typed(values, block_id, action_id):
     """
@@ -1726,52 +1770,20 @@ def handle_step_2(ack, body, client):
 
     prev_data = json.loads(body["view"]["private_metadata"])
     team_channel_id = prev_data["channel_id"]
+    count = prev_data.get("part_count") or 1
 
-    design = (_typed(vals, "design", "val") or "").strip()
-    border_design = (_typed(vals, "border_design", "val") or "").strip()
-
-    # A job is what the diagram has on it, and a diagram with neither a field
-    # nor a border is not a job. Said against the first box, because that is
-    # where a maker's eye is when they have filled in nothing.
-    if not design and not border_design:
-        ack(response_action="errors", errors={
-            "design": "Fill in the field, the border, or both - a job needs at least one."
-        })
-        return
-
-    difficulty, difficulty_error = read_difficulty(_typed(vals, "diff", "difficulty"))
-    if difficulty_error:
-        ack(response_action="errors", errors={"diff": difficulty_error})
-        return
-    border_difficulty, border_difficulty_error = read_difficulty(
-        _typed(vals, "border_diff", "difficulty"))
-    if border_difficulty_error:
-        ack(response_action="errors", errors={"border_diff": border_difficulty_error})
-        return
-
-    # A lane is described by both of its answers or by neither. Half of one is
-    # a lane nobody can read back later: a difficulty belonging to nothing, or
-    # a design whose difficulty was simply missed on the way past.
-    if difficulty and not design:
-        ack(response_action="errors", errors={
-            "design": "Name the field design, or clear the field difficulty."
-        })
-        return
-    if design and not difficulty:
-        ack(response_action="errors", errors={
-            "diff": "Give the field a difficulty, or clear the field design."
-        })
-        return
-    if border_difficulty and not border_design:
-        ack(response_action="errors", errors={
-            "border_design": "Name the border design, or clear the border difficulty."
-        })
-        return
-    if border_design and not border_difficulty:
-        ack(response_action="errors", errors={
-            "border_diff": "Give the border a difficulty, or clear the border design."
-        })
-        return
+    # Every piece needs work on it. A part with neither lane is a piece that
+    # exists and can never be worked, and the error goes against the piece it
+    # is about rather than the top of the form.
+    parts = []
+    for number in range(1, count + 1):
+        lanes = read_lanes(vals, number)
+        if not lanes:
+            ack(response_action="errors", errors={
+                f"part_{number}": "Tick Field, Border, or both.",
+            })
+            return
+        parts.append({"field": "field" in lanes, "border": "border" in lanes})
 
     ack(response_action="clear")
 
@@ -1782,20 +1794,13 @@ def handle_step_2(ack, body, client):
         invoice_number=prev_data["invoice_number"],
         task_description=prev_data["task_description"],
         due_date=prev_data["due_date"],
-        design=design or None,
-        difficulty=difficulty,
-        border_design=border_design or None,
-        border_difficulty=border_difficulty,
-        # The form's own words: leaving a part blank means the diagram does not
-        # have it. So a blank field here is a border-only job, said explicitly
-        # rather than left for the adapter to guess from an empty box.
-        field_present=bool(design),
+        parts=parts,
     )
 
     # Submitting this form is the handover into the workshop: the maker has the
     # job and is already getting it ready. So the setup timer is running by the
     # time the card appears, and there is no "Start" button - there is nothing
-    # left to start.
+    # left to start. That setup is the JOB's, not the first part's.
     task = database.get_task(task_id)
 
     # chat_postMessage accepts a user id and resolves the DM itself, returning
@@ -1807,12 +1812,15 @@ def handle_step_2(ack, body, client):
     # Saving the timestamp
     database.update_message_ts(task_id, result["channel"], result["ts"])
 
-    client.chat_postEphemeral(
+    # THE PUBLIC CHANNEL CARRIES NO TIMING. Who made what, and later that it is
+    # finished. Everything about how long it took lives in the DM card, the
+    # history and the export, where the person reading it is the person it is
+    # about.
+    client.chat_postMessage(
         channel=team_channel_id,
-        user=user_id,
-        text=(f"T-{task_id} {task['customer_name']} has been created. "
-              f"Setup has started - I've sent your work card in a DM.")
+        text=f"T-{task_id} {task['customer_name']} created by <@{user_id}>.",
     )
+
 
 # ---------------------------------------------------------------------------
 # Working the job: starting, pausing, cutting, switching
@@ -1836,14 +1844,19 @@ def handle_start(ack, body, client):
     Move onto a piece of work and start timing it.
 
     One handler behind every button that does that: Start field sheeting,
-    Resume, Start border setup and Back to field sheeting. The two action ids
-    exist because Slack will not accept the same one twice in a message, not
-    because the work differs - the value carries which lane and which activity,
-    and a button posted by an earlier version of the tracker says only which
-    job, so the lane the job is on is what resumes.
+    Resume, Start Part 2 border setup and Back to Part 1 field sheeting. The
+    value carries which piece, which lane and which activity; a button posted
+    by an earlier version of the tracker carries less, and what it leaves out
+    resolves to where the job's cursor is - the only thing such a card could
+    have meant.
+
+    FIRST ENTRY TO A LANE ASKS WHAT IT IS. A lane nobody has described yet gets
+    its form here rather than being started blind: the maker is looking at that
+    piece of the diagram at exactly this moment, which is why the question is
+    asked now and not at intake, and not when some other lane finished.
     """
     ack()
-    task_id, phase, activity = read_work_value(body["actions"][0]["value"])
+    task_id, part, phase, activity = read_work_value(body["actions"][0]["value"])
     user_id = body["user"]["id"]
     channel_id = body["container"]["channel_id"]
 
@@ -1851,13 +1864,149 @@ def handle_start(ack, body, client):
     if task is None:
         return
 
-    outcome = database.start_work(task_id, phase, activity or "production")
+    phase = phase or task["current_phase"]
+    activity = activity or "production"
+    if part is None and phase in ("field_sheeting", "border_sheeting"):
+        part = task.get("current_part")
+
+    if lane_needs_details(task, part, phase):
+        client.views_open(
+            trigger_id=body["trigger_id"],
+            view=lane_details_view(task, part, phase, activity, channel_id),
+        )
+        return
+
+    outcome = database.start_work(task_id, phase, activity, part=part)
     if outcome != "started":
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text=refusal_text(outcome, task, phase or task["current_phase"]),
+            text=refusal_text(outcome, task, phase),
         )
+        return
+
+    update_card(client, database.get_task(task_id), channel_id)
+
+
+def lane_details_view(task, part, phase, activity, channel_id):
+    """
+    What this lane is, asked on the way into it.
+
+    Two questions and an optional third. The design and the difficulty, because
+    a lane with neither cannot be read back later; and the jig, which the maker
+    often does know by now - finding and testing it is the setup - but just as
+    often does not, so the card can take it later either way.
+
+    Saving starts the work the maker pressed for. That is the whole point of
+    asking here: the form is on the way to the bench, not a detour from it.
+    """
+    named = work_name(phase, "production", part_label(task, part))
+    lane = lane_of(task, part, phase)
+    which = "field" if phase == "field_sheeting" else "border"
+    return {
+        "type": "modal",
+        "callback_id": "trk_lane_details",
+        # Slack allows 24 characters in a title and silently refuses the view
+        # above that, so this says the piece and lets the section below say the
+        # job.
+        "title": {"type": "plain_text", "text": named[:24]},
+        "submit": {"type": "plain_text", "text": "Save and start"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "private_metadata": json.dumps({
+            "task_id": task["task_id"],
+            "part": part,
+            "phase": phase,
+            "activity": activity,
+            "channel_id": channel_id,
+        }),
+        "blocks": [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn",
+                         "text": f"*{named}*\nWhat is on this part of the diagram?"},
+            },
+            {
+                "type": "input",
+                "block_id": "design_block",
+                "label": {"type": "plain_text", "text": "Design"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "val",
+                    "initial_value": lane.get("design") or "",
+                    "placeholder": {"type": "plain_text",
+                                    "text": "e.g. Tivoli" if which == "field" else "e.g. Greek Key"},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "difficulty_block",
+                "label": {"type": "plain_text", "text": "Difficulty"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "val",
+                    "max_length": 2,
+                    "initial_value": lane.get("difficulty") or "",
+                    "placeholder": {"type": "plain_text", "text": DIFFICULTY_HINT},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "jig_block",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Jig or template"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "val",
+                    "placeholder": {"type": "plain_text", "text": "e.g. 49.6 - or set it later"},
+                },
+            },
+        ],
+    }
+
+
+@app.view("trk_lane_details")
+def handle_lane_details(ack, body, client):
+    """Save what the lane is, then start the work the maker pressed for."""
+    vals = body["view"]["state"]["values"]
+    meta = json.loads(body["view"]["private_metadata"])
+
+    design = (_typed(vals, "design_block", "val") or "").strip()
+    if not design:
+        ack(response_action="errors", errors={"design_block": "Name the design."})
+        return
+    difficulty, difficulty_error = read_difficulty(_typed(vals, "difficulty_block", "val"))
+    if difficulty_error:
+        ack(response_action="errors", errors={"difficulty_block": difficulty_error})
+        return
+    if not difficulty:
+        ack(response_action="errors", errors={"difficulty_block": "Give it a difficulty."})
+        return
+
+    ack()
+    user_id = body["user"]["id"]
+    task_id = meta["task_id"]
+    channel_id = meta["channel_id"]
+    jig = (_typed(vals, "jig_block", "val") or "").strip()
+
+    task = resolve_job(client, body, task_id, user_id, channel_id)
+    if task is None:
+        return
+
+    # The details are written against the lane whichever it is - the same call
+    # the border form has always made, now told which piece and which lane.
+    database.set_lane_details(
+        task_id, meta["phase"], design, difficulty, jig or None, part=meta["part"],
+    )
+
+    outcome = database.start_work(
+        task_id, meta["phase"], meta["activity"] or "production", part=meta["part"],
+    )
+    if outcome != "started":
+        client.chat_postEphemeral(
+            channel=channel_id, user=user_id,
+            text=refusal_text(outcome, task, meta["phase"]),
+        )
+        update_card(client, database.get_task(task_id), channel_id)
         return
 
     update_card(client, database.get_task(task_id), channel_id)
@@ -1873,7 +2022,7 @@ def handle_stop(ack, body, client):
     job keeps everything it has recorded and nothing about it is finished.
     """
     ack()
-    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
+    task_id = read_work_value(body["actions"][0]["value"])[0]
     user_id = body["user"]["id"]
     channel_id = body["container"]["channel_id"]
 
@@ -1893,9 +2042,13 @@ def handle_start_cutting(ack, body, client):
     The sheeting timer keeps running, because they are still working this job -
     they have gone downstairs to cut for it. This measures how much of that
     time was spent cutting; it never takes time away from the sheeting.
+
+    It is never told which piece. Cutting is measured INSIDE the running
+    segment, and that segment already names the piece - so the attribution
+    comes from the work it is happening in rather than from the button.
     """
     ack()
-    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
+    task_id = read_work_value(body["actions"][0]["value"])[0]
     user_id = body["user"]["id"]
     channel_id = body["container"]["channel_id"]
 
@@ -1919,7 +2072,7 @@ def handle_start_cutting(ack, body, client):
 def handle_stop_cutting(ack, body, client):
     """Back upstairs. The sheeting was running throughout and still is."""
     ack()
-    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
+    task_id = read_work_value(body["actions"][0]["value"])[0]
     user_id = body["user"]["id"]
     channel_id = body["container"]["channel_id"]
 
@@ -1939,132 +2092,18 @@ def handle_stop_cutting(ack, body, client):
     update_card(client, database.get_task(task_id), channel_id)
 
 
-@app.action("trk_switch_work")
-def handle_switch_work(ack, body, client):
-    """
-    Ask what the maker is moving on to.
-
-    A form rather than a button per destination, because the important part is
-    what it says before the press: this pauses what you are doing, it does not
-    finish it, and you can come back. A row of buttons cannot say that, and
-    "Start Packing" on a field card read to a maker as leaving the field
-    behind for good.
-    """
-    ack()
-    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
-    user_id = body["user"]["id"]
-    channel_id = body["container"]["channel_id"]
-
-    task = resolve_job(client, body, task_id, user_id, channel_id)
-    if task is None:
-        return
-
-    options = switch_destinations(task)
-    if not options:
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text="There is no other work to move to on T-" + str(task_id) + " just now.",
-        )
-        return
-
-    here = task.get("working_on")
-    if here:
-        heading = (
-            "You are on *" + work_name(here["phase"], here["activity"]) + "*. "
-            "Moving pauses it - it is *not* marked finished, everything recorded on it "
-            "stays, and you can come back to it."
-        )
-    else:
-        heading = (
-            "Nothing is being timed on T-" + str(task_id) + " at the moment. "
-            "Pick what you are starting."
-        )
-
-    client.views_open(
-        trigger_id=body["trigger_id"],
-        view={
-            "type": "modal",
-            "callback_id": "trk_switch_work_modal",
-            "title": {"type": "plain_text", "text": "Switch work"},
-            "submit": {"type": "plain_text", "text": "Move to this"},
-            "close": {"type": "plain_text", "text": "Cancel"},
-            "private_metadata": json.dumps({"task_id": task_id, "channel_id": channel_id}),
-            "blocks": [
-                {"type": "section", "text": {"type": "mrkdwn", "text": heading}},
-                {
-                    "type": "input",
-                    "block_id": "target_block",
-                    "label": {"type": "plain_text", "text": "What are you moving to?"},
-                    "element": {
-                        "type": "radio_buttons",
-                        "action_id": "target",
-                        "options": [
-                            {
-                                "text": {"type": "plain_text", "text": option["label"]},
-                                "description": {"type": "plain_text", "text": option["blurb"]},
-                                "value": option["phase"] + "|" + option["activity"],
-                            }
-                            for option in options
-                        ],
-                    },
-                },
-            ],
-        },
-    )
-
-
-@app.view("trk_switch_work_modal")
-def handle_switch_work_submission(ack, body, client):
-    ack()
-    user_id = body["user"]["id"]
-    metadata = json.loads(body["view"]["private_metadata"])
-    task_id = metadata["task_id"]
-    channel_id = metadata["channel_id"]
-    chosen = body["view"]["state"]["values"]["target_block"]["target"]["selected_option"]["value"]
-    phase, activity = chosen.split("|")
-
-    task = resolve_job(client, body, task_id, user_id, channel_id)
-    if task is None:
-        return
-
-    # The job can move while the form sits open - the other surface finished
-    # the lane, or took a border back. Checked again here rather than trusted
-    # from when the form was built.
-    if not any(o["phase"] == phase and o["activity"] == activity
-               for o in switch_destinations(task)):
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text=("T-" + str(task_id) + " has moved on since that form was opened, so nothing "
-                  "has been changed. Go back to the job's card and carry on from there."),
-        )
-        return
-
-    outcome = database.start_work(task_id, phase, activity)
-    if outcome != "started":
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text=refusal_text(outcome, task, phase),
-        )
-        return
-
-    update_card(client, database.get_task(task_id), channel_id)
-
-
 @app.action("trk_start_packing")
 def handle_start_packing(ack, body, client):
     """
     Go and pack for a while, leaving the sheeting where it is.
 
-    New cards put the other work on the card itself. This stays
-    registered because a card posted by an earlier version of the tracker is
-    still live in somebody's DM, and it should keep working rather than fall
-    silent the moment a deployment lands.
+    New cards put the other work on the card itself. This stays registered
+    because a card posted by an earlier version of the tracker is still live in
+    somebody's DM, and it should keep working rather than fall silent the
+    moment a deployment lands.
     """
     ack()
-    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
+    task_id = read_work_value(body["actions"][0]["value"])[0]
     user_id = body["user"]["id"]
     channel_id = body["container"]["channel_id"]
 
@@ -2085,24 +2124,19 @@ def handle_start_packing(ack, body, client):
 
 
 # ---------------------------------------------------------------------------
-# Finishing a lane, and the decisions that follow it
+# Finishing
 # ---------------------------------------------------------------------------
-# Finishing does not move the job on by itself. The form that follows commits
-# the move - which is what lets a cancelled form be reopened by pressing the
-# same button again.
+# Two different presses share one action id, told apart by what the button
+# carries. A lane's Finish names that lane and closes it, and nothing else
+# happens - no form, no channel post, no move to somewhere the maker did not
+# ask to go. The job's Finish carries only the job and appears once nothing
+# anywhere on it is unfinished; that one opens the closing notes.
 
 @app.action("trk_complete_task")
 def handle_complete(ack, body, client):
-    """
-    Say a lane is finished, and go on to what it owes.
-
-    The only press on a card that finishes anything. The lane closes, the card
-    is rewritten so it says what comes next, and then the form that collects it
-    opens - in that order, so a maker who cancels the form is left on a card
-    offering it again rather than one still saying "finished".
-    """
+    """Finish one lane, or - when the job is done - open the closing notes."""
     ack()
-    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
+    task_id, part, phase, _activity = read_work_value(body["actions"][0]["value"])
     user_id = body["user"]["id"]
     channel_id = body["container"]["channel_id"]
 
@@ -2110,315 +2144,43 @@ def handle_complete(ack, body, client):
     if task is None:
         return
 
-    # Read before the lane closes: afterwards every lane looks finished, and
-    # the difference between finishing one and returning to its form is gone.
-    announce = lane_finish_is_new(task)
+    if phase is None:
+        # The job itself. Offered only when every lane on every piece is done,
+        # and checked again here because the card may have been sitting open.
+        if not job_is_finishable(task):
+            client.chat_postEphemeral(
+                channel=channel_id, user=user_id,
+                text=("T-" + str(task_id) + " still has work on it. Finish each part's work "
+                      "first, then the job."),
+            )
+            return
+        client.views_open(
+            trigger_id=body["trigger_id"],
+            view=notes_modal_view(
+                json.dumps({
+                    "task_id": task_id,
+                    "dm_channel_id": channel_id,
+                    "team_channel_id": task["channel_id"],
+                }),
+                "*Everything on this job is finished.* Anything worth recording before it "
+                "closes?",
+            ),
+        )
+        return
 
-    outcome = database.complete_task(task_id)
+    outcome = database.complete_task(task_id, phase=phase, part=part)
     if outcome != "completed":
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text=refusal_text(outcome, task),
+            text=refusal_text(outcome, task, phase),
         )
         return
 
-    updated_task = database.get_task(task_id)
-    phase = updated_task["current_phase"]
-    metadata = json.dumps({
-        "task_id": task_id,
-        "dm_channel_id": channel_id,
-        "team_channel_id": task["channel_id"],
-    })
-    update_card(client, updated_task, channel_id)
-
-    if phase == "field_sheeting":
-        if announce:
-            client.chat_postMessage(
-                channel=task["channel_id"],
-                text=f"T-{task_id} {updated_task['customer_name']}: field sheeting finished",
-                blocks=[{
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": (f"*T-{task_id}  {updated_task['customer_name']}*\n"
-                                 f"Field sheeting finished by <@{user_id}>\n"
-                                 f"{lane_report(updated_task, 'field_sheeting')}")
-                    }
-                }]
-            )
-
-        client.views_open(
-            trigger_id=body["trigger_id"],
-            view=border_modal_view(
-                updated_task, metadata,
-                (f"*Field sheeting finished.* "
-                 f"{lane_report(updated_task, 'field_sheeting')}\n"
-                 f"Now the border - or say there isn't one."),
-            ),
-        )
-
-    elif phase == "border_sheeting":
-        if announce:
-            client.chat_postMessage(
-                channel=task["channel_id"],
-                text=f"T-{task_id} {updated_task['customer_name']}: border finished",
-                blocks=[{
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": (f"*T-{task_id}  {updated_task['customer_name']}*\n"
-                                 f"Border finished by <@{user_id}>\n"
-                                 f"{lane_report(updated_task, 'border_sheeting')}")
-                    }
-                }]
-            )
-
-        client.views_open(
-            trigger_id=body["trigger_id"],
-            view=packing_modal_view(
-                metadata,
-                (f"*Border finished.*\n"
-                 f"{lane_report(updated_task, 'field_sheeting')}\n"
-                 f"{lane_report(updated_task, 'border_sheeting')}\n\n"
-                 f"That leaves the packing.")
-            )
-        )
-
-    elif phase == "packing":
-        client.views_open(
-            trigger_id=body["trigger_id"],
-            view=notes_modal_view(
-                metadata,
-                (f"*Packing finished.* "
-                 f"{lane_report(updated_task, 'packing')}\n"
-                 f"Anything worth recording before this job closes?")
-            )
-        )
-
-
-@app.action("trk_border_details")
-def handle_border_details(ack, body, client):
-    """
-    Describe the border now, rather than when the field is finished.
-
-    The diagram already says what the border is, so a maker who wants to go and
-    do it should not have to finish the field first to be allowed to say so.
-    Saving from here records the details and nothing else - the job's cursor
-    stays where it is, and the border becomes work the card offers.
-    """
-    ack()
-    task_id = read_work_value(body["actions"][0]["value"])[0]
-    user_id = body["user"]["id"]
-    channel_id = body["container"]["channel_id"]
-
-    task = resolve_job(client, body, task_id, user_id, channel_id)
-    if task is None:
-        return
-
-    metadata = json.dumps({
-        "task_id": task_id,
-        "dm_channel_id": channel_id,
-        "team_channel_id": task["channel_id"],
-        # The border's turn has not come, so submitting must not move the job
-        # onto it. Finishing the field still does that, exactly as before.
-        "advance_cursor": False,
-    })
-    client.views_open(
-        trigger_id=body["trigger_id"],
-        view=border_modal_view(
-            task, metadata,
-            ("*What is the border?*" + chr(10) + "Recording it here does not start "
-             "it - it just means you can go and work on it when you want to."),
-            offer_no_border=False,
-        ),
-    )
-
-
-@app.view("trk_border_modal")
-def handle_border_submission(ack, body, client):
-    user_id = body["user"]["id"]
-    vals = body["view"]["state"]["values"]
-    metadata = json.loads(body["view"]["private_metadata"])
-    task_id = metadata["task_id"]
-    dm_channel_id = metadata["dm_channel_id"]
-
-    border_design = vals["border_design_block"]["border_design"]["value"]
-    border_difficulty, difficulty_error = read_difficulty(
-        vals["border_diff_block"]["border_difficulty"]["value"])
-    if difficulty_error:
-        ack(response_action="errors", errors={"border_diff_block": difficulty_error})
-        return
-    ack()
-    border_jig = (vals["border_jig_block"]["border_jig"]["value"] or "").strip()
-
-    # Opened from the card before the border's turn: record what it is, and
-    # leave the job where it is. Opened by finishing the field: the border's
-    # turn has come, so the job moves onto it.
-    advance_cursor = metadata.get("advance_cursor", True)
-    try:
-        database.move_to_border_phase(task_id, border_design, border_difficulty, border_jig,
-                                      advance_cursor=advance_cursor)
-    except database.TrackerRefused as refusal:
-        if refusal.reason != "another_phase_running":
-            raise
-        # A timer is running on the job, so the border cannot be put back
-        # underneath it. Say so; the form can be filled in again once it stops.
-        client.chat_postEphemeral(
-            channel=dm_channel_id,
-            user=user_id,
-            text=("A timer is running on this job, so the border details have not been saved. "
-                  "Pause it first, then press the button on the card to get this form back.")
-        )
-        return
-
-    task = database.get_task(task_id)
-    repost_card(
-        client, task, dm_channel_id,
-        note="*Border details saved.* " + border_route(task),
-    )
-
-
-@app.action("trk_no_border")
-def handle_no_border(ack, body, client):
-    """
-    The maker says this job has no border.
-
-    Records the decision and turns the same modal into the packing one, so the
-    job carries straight on. The DM card is deliberately NOT touched here: the
-    cursor stays on field until the packing modal is submitted, so cancelling
-    at this point leaves the maker exactly where they were, with the border
-    decision still open on a live card.
-    """
-    ack()
-    metadata = json.loads(body["view"]["private_metadata"])
-    task_id = metadata["task_id"]
-    dm_channel_id = metadata["dm_channel_id"]
-    team_channel_id = metadata["team_channel_id"]
-    user_id = body["user"]["id"]
-
-    # The same three guards resolve_job() applies, checked by hand because this
-    # arrives from a modal: a form submission carries no container.channel_id,
-    # so the channel has to come from private_metadata instead.
-    task = database.get_task(task_id)
-
-    if task is None:
-        client.chat_postEphemeral(
-            channel=dm_channel_id,
-            user=user_id,
-            text="That job is not there any more - it may have been deleted."
-        )
-        return
-
-    if task["user_id"] != user_id:
-        client.chat_postEphemeral(
-            channel=dm_channel_id,
-            user=user_id,
-            text="This is <@" + task["user_id"] + ">'s job, so only they can change it."
-        )
-        return
-
-    database.skip_border_phase(task_id)
-
-    updated_task = database.get_task(task_id)
-
-    client.chat_postMessage(
-        channel=team_channel_id,
-        text=f"T-{task_id} {updated_task['customer_name']}: no border on this job",
-        blocks=[{
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": (f"*T-{task_id}  {updated_task['customer_name']}*\n"
-                         f"No border on this job - <@{user_id}>")
-            }
-        }]
-    )
-
-    client.views_update(
-        view_id=body["view"]["id"],
-        view=packing_modal_view(
-            json.dumps(metadata),
-            (f"*No border on this job.*\n"
-             f"{lane_report(updated_task, 'field_sheeting')}\n\n"
-             f"That leaves the packing.\n\n"
-             f"_Pressed this by mistake? Cancel, then press the button on the card to get the "
-             f"border form back._")
-        )
-    )
-
-
-@app.action("trk_undo_no_border")
-def handle_undo_no_border(ack, body, client):
-    """
-    Take back a "no border" from the packing card.
-
-    The refusal is shown, never hidden. If the correction did not happen the
-    card is left exactly as it was: rebuilding it as though it had worked would
-    leave the maker believing they have a border back when the record still
-    says the border was skipped.
-    """
-    ack()
-    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
-    user_id = body["user"]["id"]
-    channel_id = body["container"]["channel_id"]
-
-    task = resolve_job(client, body, task_id, user_id, channel_id)
-    if task is None:
-        return
-
-    outcome = database.revert_border_skip(task_id)
-
-    if outcome != "reverted":
-        if outcome == "border_skip_not_reversible":
-            text = ("The packing is already finished on this job, so the border cannot be "
-                    "reopened from here. Nothing has been changed - put what happened in the "
-                    "job's notes and tell a supervisor.")
-        elif outcome == "another_phase_running":
-            text = ("A timer is running on this job. Pause it first, then press "
-                    "'Border after all' again. Nothing has been changed.")
-        elif outcome == "border_not_skipped":
-            text = "This job is not marked as having no border, so there is nothing to undo."
-        else:
-            text = "That could not be undone, so nothing has been changed."
-        client.chat_postEphemeral(channel=channel_id, user=user_id, text=text)
-        return
-
-    updated_task = database.get_task(task_id)
-    repost_card(
-        client, updated_task, channel_id,
-        note=("*Border back on this job.* Any packing time already recorded stays. "
-              "Press the button below for the border details."),
-    )
-
-
-@app.view("trk_packing_modal")
-def handle_packing_submission(ack, body, client):
-    ack()
-    user_id = body["user"]["id"]
-    metadata = json.loads(body["view"]["private_metadata"])
-    task_id = metadata["task_id"]
-    dm_channel_id = metadata["dm_channel_id"]
-
-    outcome = database.move_to_packing_phase(task_id)
-    if outcome != "moved":
-        # This form was opened before something else changed the job - most
-        # likely the border was put back on another device. Say so and change
-        # nothing; the job's card is still live and still correct.
-        client.chat_postEphemeral(
-            channel=dm_channel_id,
-            user=user_id,
-            text=("This job's border has changed since that form was opened, so it has not been "
-                  "moved to packing and nothing has been changed. Go back to the job's card and "
-                  "carry on from there.")
-        )
-        return
-
-    task = database.get_task(task_id)
-    repost_card(
-        client, task, dm_channel_id,
-        note="*On to the packing.* Start it when you are ready.",
-    )
+    # The card, and nothing else. Finishing a lane is the maker's business and
+    # the channel does not hear about it; what comes next is on the card, which
+    # now offers whatever is still unfinished.
+    update_card(client, database.get_task(task_id), channel_id)
 
 
 @app.view("trk_notes_modal")
@@ -2439,30 +2201,37 @@ def handle_notes_submission(ack, body, client):
 
     total_time = database.format_duration(task["total_elapsed"])
 
+    # The maker's own card keeps the full record: it is their work, in their
+    # DM, and the breakdown is the thing they would want to look back at.
     client.chat_update(
         channel=dm_channel_id,
         ts=task["message_ts"],
         text=f"T-{task_id} is finished.",
-        blocks=[
-            {
-                "type": "header",
-                "text": {"type": "plain_text", "text": header_text(task, "  -  finished")},
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (f"*Total time: {total_time}*\n"
-                             f"The full breakdown has gone to the team channel."),
+        blocks=(
+            [
+                {
+                    "type": "header",
+                    "text": {"type": "plain_text", "text": header_text(task, "  -  finished")},
                 },
-            },
-        ]
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"*Total time: {total_time}*"},
+                },
+            ]
+            + [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(_time_lines(task))}}
+            ]
+        ),
     )
 
+    # THE PUBLIC CHANNEL CARRIES NO TIMING. It says what happened and who did
+    # it, and nothing about how long anything took. A workshop channel is an
+    # operational feed, not a performance board, and a breakdown of one
+    # person's minutes posted where everyone reads it is a different thing from
+    # the same breakdown on their own card.
     client.chat_postMessage(
         channel=team_channel_id,
-        text=f"T-{task_id} {task['customer_name']} finished by <@{user_id}> - {total_time}",
-        blocks=job_summary_blocks(task, user_id, general_notes, issues),
+        text=f"T-{task_id} {task['customer_name']} completed by <@{user_id}>.",
     )
 
 
