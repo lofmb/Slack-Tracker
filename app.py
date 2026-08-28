@@ -147,16 +147,6 @@ WORK_NAMES = {
     ("packing", "production"): "Packing",
 }
 
-# What each move to that work is worth saying about it, on the Switch work
-# form where the maker is choosing between them.
-WORK_BLURBS = {
-    ("field_sheeting", "setup"): "Getting the field ready - material, drawings, jig",
-    ("field_sheeting", "production"): "Sheeting the field",
-    ("border_sheeting", "setup"): "Getting the border ready",
-    ("border_sheeting", "production"): "Sheeting the border",
-    ("packing", "production"): "Packing this job; the sheeting waits, unfinished",
-}
-
 # The lane itself, as opposed to a piece of work inside it. Used where a figure
 # covers the whole lane - its setup and its sheeting together - so that number
 # is never labelled with the name of one of its halves.
@@ -172,6 +162,16 @@ FINISH_LABELS = {
     "border_sheeting": "Border finished",
     "packing": "Packing finished",
 }
+
+# What state a job is in, as a mark a maker reads from three feet away without
+# reading anything. The card and the workshop channel use the same four, so a
+# job that is running looks the same wherever it is seen; changing one of these
+# changes both, which is the point of them being here rather than inline.
+MARK_RUNNING = "🟢"
+MARK_PAUSED = "⏸"
+MARK_CUTTING = "✂️"
+MARK_FINISHED = "✅"
+
 
 def work_name(phase, activity, part=None):
     """
@@ -338,8 +338,12 @@ def switch_destinations(task):
     here = task.get("working_on") or {}
     out = []
     for part, phase, activity in every_work(task):
-        if (phase == here.get("phase") and activity == here.get("activity")
-                and part == here.get("part")):
+        # The LANE the maker is on is not somewhere to move to, whichever of its
+        # two activities they are holding. Comparing the activity as well left a
+        # lane offering itself: in the first seconds of a sheeting run nothing
+        # has accrued yet, so the lane still reads as being at its setup, and
+        # the card put up a button that would have paused the very work in hand.
+        if phase == here.get("phase") and part == here.get("part"):
             continue
         if not lane_open(task, part, phase):
             continue
@@ -347,13 +351,7 @@ def switch_destinations(task):
         # so an undescribed border is somewhere to go - the form opens when the
         # maker gets there. What is NOT somewhere to go is a lane the diagram
         # does not have, which lane_open has already dropped.
-        out.append({
-            "part": part,
-            "phase": phase,
-            "activity": activity,
-            "label": work_name(phase, activity, part_label(task, part)),
-            "blurb": WORK_BLURBS[(phase, activity)],
-        })
+        out.append({"part": part, "phase": phase, "activity": activity})
     return out
 
 
@@ -378,18 +376,25 @@ def other_work_rows(task, already_offered=()):
     it: "Part 2" over "Field" and "Border" reads; "Part 2" over "Part 2 field
     setup" is the same words twice.
 
+    The control says everything about the lane that a maker needs here. "Field"
+    is a lane nobody has opened; "Back to field" is one with time already on it.
+    That is the whole of what a line of prose above the row used to say, and it
+    is read in the same glance as the press rather than above it.
+
+    NOTHING HERE IS EVER THE HIGHLIGHTED BUTTON. Every press in this section
+    pauses the work the maker is holding, and a card should not colour in the
+    one move that stops what they are doing.
+
     Grouped per piece for two reasons, one of them structural. Reading, as
     above. And Slack requires an action_id to be unique WITHIN ITS BLOCK - Part
     1's field and Part 2's field share one, so side by side in a single block
-    the card would not render at all.
+    the card would not render at all. A job drawn as one piece has no such
+    clash and no headings to sit under, so its rows are merged into one.
 
     Returns [(heading or None, [buttons])].
     """
     task_id = task["task_id"]
-    cursor_phase = task["current_phase"]
-    cursor_part = task.get("current_part")
     multi = (task.get("part_count") or 1) > 1
-    here = task.get("working_on") or {}
 
     by_part = {}
     for destination in switch_destinations(task):
@@ -401,34 +406,29 @@ def other_work_rows(task, already_offered=()):
             continue
         if work_value(task_id, part, phase, activity) in already_offered:
             continue
-        # The lane the job's cursor is on leads, because after a packing
-        # interruption "back to the sheeting that is waiting" is the common
-        # move.
-        leading = (
-            phase == cursor_phase
-            and part == cursor_part
-            and not (phase == here.get("phase") and part == here.get("part"))
-        )
+        recorded = (work_elapsed(task, part, phase, "setup")
+                    + work_elapsed(task, part, phase, "production"))
         if phase == "packing":
-            label = "Packing"
-        elif multi:
+            # Packing is the job's, so its button says so rather than leaning on
+            # a heading to explain what it belongs to. "Back to pack the job" is
+            # not English, so this one names its own return.
+            label = "Back to packing" if recorded else "Pack the job"
+        else:
             label = LANE_NAMES[phase]
-        else:
-            label = work_name(phase, activity)
-        if leading and work_elapsed(task, part, phase, activity):
-            label = "Back to " + lower_name(label)
-        by_part.setdefault(part, []).append(_start_button(
-            label, task_id, part, phase, activity, style="primary" if leading else None,
-        ))
+            if recorded:
+                label = "Back to " + lower_name(label)
+        by_part.setdefault(part, []).append(
+            _start_button(label, task_id, part, phase, activity)
+        )
 
-    rows = []
-    for part in sorted(by_part, key=lambda p: (p is None, p or 0)):
-        if part is None:
-            heading = "*The job*" if multi else None
-        else:
-            heading = f"*Part {part}*  {_part_shape(task, part)}" if multi else None
-        rows.append((heading, by_part[part]))
-    return rows
+    ordered = sorted(by_part, key=lambda p: (p is None, p or 0))
+    if not multi:
+        merged = [button for part in ordered for button in by_part[part]]
+        return [(None, merged)] if merged else []
+    return [
+        (f"*Part {part}*{_part_ticks(task, part)}" if part is not None else None, by_part[part])
+        for part in ordered
+    ]
 
 
 def lane_entry_activity(task, part, phase):
@@ -448,29 +448,21 @@ def lane_entry_activity(task, part, phase):
     return "setup"
 
 
-def _part_shape(task, part):
+def _part_ticks(task, part):
     """
-    One piece's lanes in a few words - "field done · border 1h 12m".
+    A tick beside a piece for each of its lanes that is finished.
 
-    Sits above that piece's buttons so the maker can see where a piece stands
-    without reading the time table further down. Short on purpose: it is a
-    signpost, not a report.
+    The one thing the buttons underneath genuinely cannot say. An open lane is
+    a button, a started one says "Back to"; but a lane that is DONE has no
+    button at all, and bare absence reads the same as a lane the diagram never
+    had. A mark on a heading already on screen settles that without describing
+    the piece back to a maker who is looking at it.
     """
-    bits = []
-    for phase, name in (("field_sheeting", "field"), ("border_sheeting", "border")):
-        lane = lane_of(task, part, phase)
-        if not lane.get("present", True):
-            continue
-        state = lane.get("state")
-        if state == "complete":
-            bits.append(name + " done")
-        elif state == "running":
-            bits.append(name + " running")
-        elif lane.get("elapsed"):
-            bits.append(name + " " + database.format_duration(lane["elapsed"]))
-        else:
-            bits.append(name + " not started")
-    return "  ·  ".join(bits)
+    return "".join(
+        "   ✓ " + LANE_NAMES[phase]
+        for phase in ("field_sheeting", "border_sheeting")
+        if lane_state(task, part, phase) == "complete"
+    )
 
 
 def other_work_buttons(task, already_offered=()):
@@ -543,8 +535,9 @@ def header_text(task, suffix=""):
     "T-12  Customer Name", trimmed to something Slack will accept.
 
     The job number and any suffix are never what gets cut: they are how a maker
-    finds the card. A name too long to fit is shortened here and shown in full
-    in the fields below, so nothing is lost.
+    finds the card. This heads the CLOSED card, where the job is what the card
+    is about; a card still being worked heads with the work instead and carries
+    the customer's full name in its foot.
     """
     prefix = "T-" + str(task["task_id"]) + "  "
     room = HEADER_LIMIT - len(prefix) - len(suffix)
@@ -552,10 +545,6 @@ def header_text(task, suffix=""):
     if len(name) > room:
         name = name[: max(room - 1, 0)].rstrip() + "…"
     return prefix + name + suffix
-
-
-def customer_was_trimmed(task):
-    return not header_text(task).endswith(task["customer_name"] or "")
 
 
 def _button(text, action_id, value, style=None, confirm=None):
@@ -649,7 +638,10 @@ def _finish_button(task, part, phase):
     if not on_it_now and work_elapsed(task, part, phase, "production") <= 0:
         return None
     named = work_name(phase, "production", part_label(task, part))
-    label = FINISH_LABELS[phase] if part_label(task, part) is None else named + " finished"
+    # The heading already says which piece is being worked, so the widest button
+    # on the card does not repeat it. The confirmation still names the lane in
+    # full, which is where a maker about to close something for good reads it.
+    label = FINISH_LABELS[phase]
     return _button(
         label,
         "trk_complete_task",
@@ -730,7 +722,13 @@ def card_actions(task):
     What the maker can do with the work they are HOLDING.
 
     Only that. Everything else on the job is a row of its own below, one per
-    piece, so this strip stays short enough to read at a bench.
+    piece, so this strip stays short enough to read at a bench. Looking after
+    the job itself - correcting its details, taking it off the list - is not
+    work, and sits in its own row at the foot rather than among the presses a
+    maker makes while sheeting.
+
+    At most one button here is ever highlighted: the forward move. Where there
+    is no forward move there is no highlight.
     """
     task_id = task["task_id"]
     here = task.get("working_on")
@@ -752,26 +750,21 @@ def card_actions(task):
                 task_id, part, phase, "setup", style="primary",
             ))
         buttons.append(_button("Pause setup", "trk_stop_task", work_value(task_id)))
-        buttons.append(_button("Edit details", "trk_edit_task", work_value(task_id)))
-        if delete_still_applies(task):
-            buttons.append(_delete_button(task_id))
         return buttons
 
     if here and here["activity"] == "setup":
         # Setting a lane up. The forward move is the sheeting itself, and this
-        # is the moment the jig becomes known, so both are on the card.
+        # is the moment the jig becomes known, so both are on the card. The
+        # heading has already said which piece, so the button does not.
         part = here.get("part")
         buttons.append(_start_button(
-            "Start " + lower_name(work_name(here["phase"], "production", part_label(task, part))),
+            "Start " + lower_name(work_name(here["phase"], "production")),
             task_id, part, here["phase"], "production", style="primary",
         ))
         buttons.append(_button("Pause setup", "trk_stop_task", work_value(task_id)))
         jig = _jig_button(task)
         if jig:
             buttons.append(jig)
-        buttons.append(_button("Edit details", "trk_edit_task", work_value(task_id)))
-        if delete_still_applies(task):
-            buttons.append(_delete_button(task_id))
         return buttons
 
     if here:
@@ -832,109 +825,12 @@ def card_actions(task):
                     "Start " + lower_name(work_name(phase, "production", part_label(task, part))),
                     task_id, part, phase, "production",
                 ))
-    buttons.append(_button("Edit details", "trk_edit_task", work_value(task_id)))
-    # A job entered by mistake is as likely to be spotted on the paused card as
-    # on the running one - the maker stops, looks, and sees it is the wrong job.
-    if delete_still_applies(task):
-        buttons.append(_delete_button(task_id))
     # The one press that ends the job, offered only once there is nothing left
     # unfinished anywhere on it.
     if job_is_finishable(task) and task["current_phase"] != "completed":
         buttons.append(_button("Finish the job", "trk_complete_task",
                                work_value(task_id), style="primary"))
     return buttons
-
-
-def _status_lines(task):
-    """
-    What the maker is doing, said plainly and first.
-
-    A RUNNING timer says it is running and does not print a number. Slack is
-    not a stopwatch: a card rendered at the moment work starts would read
-    "so far: 0s" and sit there saying it until something else redrew the card,
-    which reads as a timer that is not working. Paused and finished work shows
-    what it recorded, because those figures are final.
-    """
-    here = task.get("working_on")
-    if not here:
-        last = task.get("last_work")
-        lines = ["*Paused - nothing is being timed*"]
-        if last:
-            if last["phase"] == "job_setup":
-                name = "Initial setup"
-                recorded = task.get("job_setup_elapsed") or 0
-            else:
-                name = work_name(last["phase"], last["activity"], part_label(task, last.get("part")))
-                recorded = work_elapsed(task, last.get("part"), last["phase"], last["activity"])
-            # A figure of nought says less than no figure: it reads as a timer
-            # that did not work, when what happened is that the maker moved on
-            # before a second had passed.
-            if recorded:
-                lines.append(
-                    "Last on " + lower_name(name) + ", "
-                    + database.format_duration(recorded) + " recorded."
-                )
-            else:
-                lines.append("Last on " + lower_name(name) + ".")
-        return lines
-
-    if here["phase"] == "job_setup":
-        # The opening preparation, which is the JOB's - not the first piece's.
-        return [
-            "*Initial setup - running*",
-            "_Reading the drawings, checking what came in, getting the material together._",
-        ]
-
-    name = work_name(here["phase"], here["activity"], part_label(task, here.get("part")))
-    lines = ["*" + name + " - running*"]
-    if here["activity"] == "setup":
-        lines.append("_Getting this part ready to sheet - material, drawings, and the jig._")
-    cutting = task.get("cutting_now")
-    if cutting:
-        inside = work_name(cutting["parent_phase"], "production").lower()
-        lines.append(
-            "*Cutting now* - the " + inside + " timer is still running, so this time counts "
-            "as " + inside + " either way."
-        )
-    return lines
-
-
-def _fields(task):
-    """
-    The job itself. Two columns, so it reads as a small label rather than
-    another paragraph, and only the things that have an answer.
-
-    Designs and jigs are NOT here on a job with several pieces: each piece has
-    its own, and six of them in a two-column grid is a table pretending to be a
-    label. They live under that piece in the time section instead.
-    """
-    pairs = []
-    # Only when the header could not hold it - otherwise it would be on the
-    # card twice.
-    if customer_was_trimmed(task):
-        pairs.append(("Customer", task["customer_name"]))
-    pairs += [("Job", task["task_description"]), ("Invoice", task["invoice_number"])]
-    if (task.get("part_count") or 1) > 1:
-        pairs.append(("Parts", str(task["part_count"])))
-    else:
-        lane = lane_of(task, 1, "field_sheeting")
-        border = lane_of(task, 1, "border_sheeting")
-        if lane.get("design"):
-            pairs.append(("Field design", lane["design"]))
-        if lane.get("difficulty"):
-            pairs.append(("Field difficulty", lane["difficulty"]))
-        if border.get("design"):
-            pairs.append(("Border design", border["design"]))
-        if border.get("difficulty"):
-            pairs.append(("Border difficulty", border["difficulty"]))
-        if lane.get("jigs"):
-            pairs.append(("Field jig", lane["jigs"]))
-        if border.get("jigs"):
-            pairs.append(("Border jig", border["jigs"]))
-    pairs.append(("Due", due_date_display(task)))
-    # Slack renders at most ten fields in a section.
-    return [{"type": "mrkdwn", "text": "*" + label + "*\n" + str(value)}
-            for label, value in pairs[:10]]
 
 
 # ---------------------------------------------------------------------------
@@ -1171,30 +1067,176 @@ def _time_lines(task, total_label="Total job time"):
     ]
 
 
+def _headline(task):
+    """
+    The one thing the card is about: the work that is being timed right now.
+
+    Slack's header is the only block with its own type size, so it carries the
+    state and nothing else - the job number and the customer have all day to be
+    read and sit in the foot. Cutting takes the heading while it runs because
+    that is what the maker is doing, and it names the sheeting it is inside so
+    the time is never in doubt.
+    """
+    here = task.get("working_on")
+    if not here:
+        return MARK_PAUSED + "  Paused - nothing is being timed"
+    cutting = task.get("cutting_now")
+    if cutting:
+        inside = work_name(cutting["parent_phase"], "production",
+                           part_label(task, cutting.get("part")))
+        return MARK_CUTTING + "  " + inside + " - cutting now"
+    if here["phase"] == "job_setup":
+        return MARK_RUNNING + "  Initial setup - running"
+    named = work_name(here["phase"], here["activity"], part_label(task, here.get("part")))
+    return MARK_RUNNING + "  " + named + " - running"
+
+
+def _facts_line(task):
+    """
+    One grey line under the heading, or nothing at all.
+
+    The only thing allowed between the work and the buttons, and it earns the
+    place by being about the work in hand: which design, how hard, which jig -
+    what a maker checks against the diagram without leaving the bench. Where
+    there is nothing true to put here the line is not drawn; nothing is invented
+    to fill it.
+
+    A paused card uses it for the one figure that is finished and therefore
+    safe to print.
+    """
+    here = task.get("working_on")
+    if not here:
+        last = task.get("last_work")
+        if not last:
+            return None
+        if last["phase"] == "job_setup":
+            name = "Initial setup"
+            recorded = task.get("job_setup_elapsed") or 0
+        else:
+            name = work_name(last["phase"], last["activity"], part_label(task, last.get("part")))
+            recorded = work_elapsed(task, last.get("part"), last["phase"], last["activity"])
+        line = "Last on " + lower_name(name)
+        # A figure of nought says less than no figure: it reads as a timer that
+        # did not work, when the maker simply moved on within the second.
+        if recorded:
+            line += "  ·  " + database.format_duration(recorded) + " recorded"
+        return line
+
+    cutting = task.get("cutting_now")
+    phase = cutting["parent_phase"] if cutting else here["phase"]
+    part = cutting.get("part") if cutting else here.get("part")
+    if phase not in ("field_sheeting", "border_sheeting"):
+        return None
+    lane = lane_of(task, part, phase)
+    described = [bit for bit in (
+        lane.get("design"),
+        ("difficulty " + lane["difficulty"]) if lane.get("difficulty") else None,
+        ("jig " + lane["jigs"]) if lane.get("jigs") else None,
+    ) if bit]
+    return "  ·  ".join(described) or None
+
+
+def _admin_actions(task):
+    """
+    Looking after the job rather than working it: correct it, or take it off
+    the list.
+
+    Its own row at the foot, because a maker reaching for Pause should not find
+    Delete beside it. Offered in exactly the states that offered it before - a
+    card in the middle of sheeting has never carried either, and moving a strip
+    around is no reason to start.
+    """
+    here = task.get("working_on") or {}
+    if here and here.get("phase") != "job_setup" and here.get("activity") != "setup":
+        return []
+    buttons = [_button("Edit details", "trk_edit_task", work_value(task["task_id"]))]
+    if delete_still_applies(task):
+        buttons.append(_delete_button(task["task_id"]))
+    return buttons
+
+
+def _parts_finished(task):
+    """
+    How much of a multi-piece job is behind the maker, as (done, total).
+
+    None on a job drawn as one piece, where "0 of 1 parts finished" says only
+    that the job is not finished, which the card has already said - and None
+    again until the first piece is actually done, for the same reason. A piece
+    is done when neither of its lanes is still open; a lane the diagram never
+    had was never work.
+    """
+    rows = task.get("parts") or []
+    if len(rows) < 2:
+        return None
+    done = sum(
+        1 for row in rows
+        if not lane_open(task, row.get("part"), "field_sheeting")
+        and not lane_open(task, row.get("part"), "border_sheeting")
+    )
+    return (done, len(rows)) if done else None
+
+
+def _foot_lines(task):
+    """
+    Which job this is, in grey, at the bottom. Two lines, read once.
+
+    The customer's name goes in FULL and unconditionally. The heading is given
+    over to the work now, so this is the only place the card carries the name at
+    all, and the name most likely to matter is the long one a heading would have
+    cut.
+    """
+    here = task.get("working_on") or {}
+    first = "  ·  ".join(str(bit) for bit in (
+        "T-" + str(task["task_id"]),
+        task["customer_name"],
+        task["task_description"],
+    ) if bit)
+
+    second = [str(task["invoice_number"]), "due " + due_date_display(task)]
+    counted = _parts_finished(task)
+    if counted:
+        second.append(f"{counted[0]} of {counted[1]} parts finished")
+    if not here and task["total_elapsed"]:
+        # Only where nothing is accruing, so the figure is final rather than a
+        # snapshot that went stale the moment it was drawn.
+        second.append(database.format_duration(task["total_elapsed"]) + " on this job")
+    if here.get("activity") == "setup":
+        # A job starts timing its setup the moment it exists, and nothing closes
+        # a timer left running overnight. Pause is already on the card; this
+        # says, where the risk actually is, what it is for.
+        second.append("Pause if you stop working.")
+    return [first, "  ·  ".join(second)]
+
+
 def job_card(task, note=None):
     """
     The whole card. Returns (fallback text, blocks).
 
-    Read top to bottom it answers, in order: which job is this, what am I on,
-    what can I do with it, what else is on the job, and what has been recorded.
-    The buttons come BEFORE the reading matter - on a phone the job's details
-    and its times run well past a screen, and a maker wanting to pause or start
-    the cutting had to scroll past all of it while standing at a bench.
+    A WORKING INTERFACE, in the order a maker at a bench asks for it: what am I
+    on, what can I do with it, what else could I move to. The job's own details
+    are true all day and are read once, so they go grey at the foot.
 
-    `note` is a single line put at the top when something just happened that
-    the card alone would not explain.
+    WHILE A TIMER IS RUNNING THE CARD PRINTS NO DURATION ANYWHERE. Slack does
+    not tick and a card is only redrawn by a press, so a figure beside running
+    work is already wrong when it is drawn - the card read "0s" beside work it
+    said in the same breath was running. Figures appear only where nothing is
+    accruing and they are final. None of the detail is lost: the full breakdown
+    is on the closed card, in the ledger and in the export, which is where
+    somebody reading a job back actually looks.
+
+    `note` is a single grey line BELOW the buttons when something just happened
+    that the card alone would not explain. Below, because a confirmation must
+    not push the work the maker is holding down the card.
     """
     task_id = task["task_id"]
     blocks = [{
         "type": "header",
-        "text": {"type": "plain_text", "text": header_text(task)},
+        "text": {"type": "plain_text", "text": _headline(task), "emoji": True},
     }]
-    if note:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": note}})
-    blocks.append({
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": "\n".join(_status_lines(task))},
-    })
+
+    facts = _facts_line(task)
+    if facts:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": facts}]})
 
     actions = card_actions(task)
     if actions:
@@ -1204,10 +1246,15 @@ def job_card(task, note=None):
             "elements": actions,
         })
 
+    if note:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": note}]})
+
     # The rest of the job, one row per piece. A maker is not walking a wizard:
     # while the job is unfinished they can move between whatever work it
     # actually contains, and the card says so rather than hiding it behind a
-    # form.
+    # form. What moving DOES is not explained here every time - the buttons
+    # under a heading are the explanation, and a maker who presses one finds out
+    # once rather than reading it on every render.
     #
     # Each piece gets its OWN actions block. That is not only for reading:
     # Slack scopes an action_id to its block, and Part 1's field sheeting and
@@ -1217,11 +1264,10 @@ def job_card(task, note=None):
                if (b.get("action_id") or "").startswith("trk_start_")}
     rows = other_work_rows(task, offered)
     if rows:
+        blocks.append({"type": "divider"})
         blocks.append({
             "type": "context",
-            "elements": [{"type": "mrkdwn",
-                          "text": "*Other work on this job* - moving pauses what you are on "
-                                  "and finishes nothing."}],
+            "elements": [{"type": "mrkdwn", "text": "*Other work on this job*"}],
         })
         for index, (heading, buttons) in enumerate(rows, start=1):
             if heading:
@@ -1235,23 +1281,20 @@ def job_card(task, note=None):
                 "elements": buttons,
             })
 
-    times = _time_lines(task)
-    if times:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(times)}})
-    blocks.append({"type": "section", "fields": _fields(task)})
+    admin = _admin_actions(task)
+    if admin:
+        blocks.append({
+            "type": "actions",
+            "block_id": "task_admin_" + str(task_id),
+            "elements": admin,
+        })
 
-    footer = "Logged by <@" + task["user_id"] + ">"
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": "\n".join(_foot_lines(task))}],
+    })
+
     here = task.get("working_on") or {}
-    if here.get("activity") == "setup":
-        # A job starts timing its setup the moment it exists, and nothing
-        # closes a timer left running overnight. Pause is already on the card;
-        # this says, where the risk actually is, what it is for.
-        footer += "  ·  Pause if you stop working - you can pick it up again any time."
-    # No "moving finishes nothing" line here: the row above says exactly that,
-    # and a card that says the same sentence twice reads as a card nobody
-    # edited.
-    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]})
-
     if not here:
         summary = "T-" + str(task_id) + ": paused"
     elif here["phase"] == "job_setup":
@@ -1749,13 +1792,20 @@ def step_2_view(step1_data):
     Checkboxes rather than a text box per lane, because the question is yes or
     no and a tick answers it without the maker having to know that leaving a
     box empty is how you say "there isn't one".
+
+    Every piece needs at least one lane, and the FORM enforces it: the block is
+    required, so Slack refuses the submission before it is sent. A part with
+    neither lane is a piece that exists and can never be worked, and that is
+    checked again in the handler and once more by the database - three places,
+    because a maker who already had this form open when it changed still submits
+    the shape they were given. None of that is explained on the screen. A rule
+    the form will not let you break does not need a paragraph telling you not to
+    break it.
     """
     count = step1_data["part_count"]
     blocks = [{
         "type": "section",
-        "text": {"type": "mrkdwn",
-                 "text": "*What work is on each part?*\nTick what the diagram has. "
-                         "Every part needs at least one."},
+        "text": {"type": "mrkdwn", "text": "*What work is on each part?*"},
     }]
     for number in range(1, count + 1):
         # One piece per section. On a single-piece job the heading would be
@@ -1766,10 +1816,13 @@ def step_2_view(step1_data):
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f"*Part {number}*"},
             })
+        # REQUIRED, and that is the whole of the rule. Left optional, Slack
+        # printed "(optional)" after the label - the form said the opposite of
+        # what the workshop means, and a sentence above it was being used to
+        # argue with its own control.
         blocks.append({
             "type": "input",
             "block_id": f"part_{number}",
-            "optional": True,
             "label": {"type": "plain_text",
                       "text": "Work" if count == 1 else f"Part {number} work"},
             "element": {
@@ -1784,8 +1837,8 @@ def step_2_view(step1_data):
     blocks.append({
         "type": "context",
         "elements": [{"type": "mrkdwn",
-                      "text": "Creating the job starts Initial setup and sends your work "
-                              "card in a DM."}],
+                      "text": "Creating the job starts the clock on its Initial setup, and "
+                              "sends your work card straight to you in a DM."}],
     })
     return {
         "type": "modal",
@@ -1868,13 +1921,18 @@ def handle_step_2(ack, body, client):
     # Saving the timestamp
     database.update_message_ts(task_id, result["channel"], result["ts"])
 
-    # THE PUBLIC CHANNEL CARRIES NO TIMING. Who made what, and later that it is
-    # finished. Everything about how long it took lives in the DM card, the
-    # history and the export, where the person reading it is the person it is
-    # about.
+    # THE PUBLIC CHANNEL CARRIES NO TIMING. Who is making what, and later that
+    # it is finished. Everything about how long it took lives in the DM card,
+    # the history and the export, where the person reading it is the person it
+    # is about.
+    #
+    # A person, then what they are doing - the room is reading about a colleague
+    # picking up a job, not a row being written. Only starting and finishing:
+    # moving between a field and a border is the maker's own business and the
+    # channel never hears about it.
     client.chat_postMessage(
         channel=team_channel_id,
-        text=f"T-{task_id} {task['customer_name']} created by <@{user_id}>.",
+        text=f"{MARK_RUNNING} <@{user_id}> has started T-{task_id} {task['customer_name']}",
     )
 
 
@@ -1948,10 +2006,15 @@ def lane_details_view(task, part, phase, activity, channel_id):
     """
     What this lane is, asked on the way into it.
 
-    Two questions and an optional third. The design and the difficulty, because
-    a lane with neither cannot be read back later; and the jig, which the maker
-    often does know by now - finding and testing it is the setup - but just as
-    often does not, so the card can take it later either way.
+    Two questions, and only two: the design and the difficulty, because a lane
+    with neither cannot be read back later. Both are known from the diagram the
+    maker is holding as they answer.
+
+    THE JIG IS NOT ASKED HERE. Finding and testing it IS the setup, so at the
+    moment this form opens the maker frequently does not know it yet, and a box
+    they cannot fill is a question that teaches them to skip questions. It is
+    recorded from the work card instead, with "Set jig / template", at the point
+    it becomes known - which is where it was always genuinely established.
 
     Saving starts the work the maker pressed for. That is the whole point of
     asking here: the form is on the way to the bench, not a detour from it.
@@ -2005,17 +2068,6 @@ def lane_details_view(task, part, phase, activity, channel_id):
                     "placeholder": {"type": "plain_text", "text": DIFFICULTY_HINT},
                 },
             },
-            {
-                "type": "input",
-                "block_id": "jig_block",
-                "optional": True,
-                "label": {"type": "plain_text", "text": "Jig or template"},
-                "element": {
-                    "type": "plain_text_input",
-                    "action_id": "val",
-                    "placeholder": {"type": "plain_text", "text": "e.g. 49.6 - or set it later"},
-                },
-            },
         ],
     }
 
@@ -2042,16 +2094,16 @@ def handle_lane_details(ack, body, client):
     user_id = body["user"]["id"]
     task_id = meta["task_id"]
     channel_id = meta["channel_id"]
-    jig = (_typed(vals, "jig_block", "val") or "").strip()
 
     task = resolve_job(client, body, task_id, user_id, channel_id)
     if task is None:
         return
 
     # The details are written against the lane whichever it is - the same call
-    # the border form has always made, now told which piece and which lane.
+    # the border form has always made, now told which piece and which lane. No
+    # jig: it is recorded from the card, once the maker knows it.
     database.set_lane_details(
-        task_id, meta["phase"], design, difficulty, jig or None, part=meta["part"],
+        task_id, meta["phase"], design, difficulty, part=meta["part"],
     )
 
     outcome = database.start_work(
@@ -2287,7 +2339,7 @@ def handle_notes_submission(ack, body, client):
     # the same breakdown on their own card.
     client.chat_postMessage(
         channel=team_channel_id,
-        text=f"T-{task_id} {task['customer_name']} completed by <@{user_id}>.",
+        text=f"{MARK_FINISHED} <@{user_id}> has finished T-{task_id} {task['customer_name']}",
     )
 
 
