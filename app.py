@@ -442,10 +442,14 @@ def lane_needs_details(task, part, phase):
     border was described in a form reached by finishing the field; now every
     lane is described the same way, on the way in.
     """
+    # Packing has none. It is fetch-box-and-pack: there is no design to name
+    # and no difficulty to give it, and asking would be inventing a question.
+    if phase == "packing":
+        return False
     lane = lane_of(task, part, phase)
     if not lane.get("present", True):
         return False
-    if lane.get("state") in ("complete",):
+    if lane.get("state") == "complete":
         return False
     return not lane.get("design")
 
@@ -2254,67 +2258,36 @@ def handle_notes_submission(ack, body, client):
 
 @app.action("trk_add_jig")
 def handle_add_jig(ack, body, client):
+    """
+    Record the jig on the work the maker is doing.
+
+    It asks nothing but the value. The button is only on the card while a lane
+    is being worked, and it carries which piece and which lane - so there is no
+    "which work used it?" left to ask. That question existed because the jig
+    button used to sit on every card, including ones where the answer was not
+    obvious; now the card only offers it where the answer is the work in hand.
+    """
     ack()
-    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
+    task_id, part, phase, _activity = read_work_value(body["actions"][0]["value"])
     user_id = body["user"]["id"]
     channel_id = body["container"]["channel_id"]
 
     task = resolve_job(client, body, task_id, user_id, channel_id)
     if task is None:
         return
-    phase = task["current_phase"]
 
-    # Remember which phase the card was on, so the right card comes back
-    # after the modal
-    metadata = json.dumps({"task_id": task_id, "channel_id": channel_id, "phase": phase})
+    here = task.get("working_on") or {}
+    phase = phase or here.get("phase")
+    if part is None:
+        part = here.get("part")
+    if phase not in ("field_sheeting", "border_sheeting"):
+        client.chat_postEphemeral(
+            channel=channel_id, user=user_id,
+            text="Start the field or the border first - a jig belongs to the work it is used on.",
+        )
+        return
 
-    # On the field there is only one place a jig can go. From the border
-    # onwards the maker chooses, because field work genuinely can continue with
-    # another jig AFTER the field was finished - that is still an added jig,
-    # not a correction, and the earlier one must stay.
-    blocks = []
-    if phase != "field_sheeting":
-        field_option = {
-            "text": {"type": "plain_text", "text": "Field sheeting"},
-            "value": "field_sheeting"
-        }
-        border_option = {
-            "text": {"type": "plain_text", "text": "Border sheeting"},
-            "value": "border_sheeting"
-        }
-        # A border that did not happen used no jig, and storage refuses one,
-        # so it is not offered - a choice that always errors is worse than no
-        # choice.
-        phase_element = {
-            "type": "static_select",
-            "action_id": "jig_phase",
-            "placeholder": {"type": "plain_text", "text": "Field or border?"},
-            "options": [field_option] if task.get("border_skipped") else [field_option, border_option]
-        }
-        if task.get("border_skipped"):
-            phase_element["initial_option"] = field_option
-        # On the Border card the border is the usual answer, so it is
-        # pre-picked; from Packing there is no obvious answer, so the maker
-        # must choose
-        if phase == "border_sheeting":
-            phase_element["initial_option"] = border_option
-        blocks.append({
-            "type": "input",
-            "block_id": "phase_block",
-            "label": {"type": "plain_text", "text": "Which work used it?"},
-            "element": phase_element
-        })
-    blocks.append({
-        "type": "input",
-        "block_id": "jig_block",
-        "label": {"type": "plain_text", "text": "Jig or template"},
-        "element": {
-            "type": "plain_text_input",
-            "action_id": "jig_size",
-            "placeholder": {"type": "plain_text", "text": "e.g. 49.6, 49.4/49.8, or template"}
-        }
-    })
-
+    named = work_name(phase, "production", part_label(task, part))
     client.views_open(
         trigger_id=body["trigger_id"],
         view={
@@ -2323,10 +2296,28 @@ def handle_add_jig(ack, body, client):
             "title": {"type": "plain_text", "text": "Jig or template"},
             "submit": {"type": "plain_text", "text": "Save"},
             "close": {"type": "plain_text", "text": "Cancel"},
-            "private_metadata": metadata,
-            "blocks": blocks
-        }
+            "private_metadata": json.dumps({
+                "task_id": task_id,
+                "channel_id": channel_id,
+                "part": part,
+                "phase": phase,
+            }),
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "jig_block",
+                    "label": {"type": "plain_text", "text": "Jig or template for " + named.lower()},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "jig_size",
+                        "placeholder": {"type": "plain_text",
+                                        "text": "e.g. 49.6, 49.4/49.8, or template"},
+                    },
+                },
+            ],
+        },
     )
+
 
 @app.view("trk_add_jig_modal")
 def handle_add_jig_submission(ack, body, client):
@@ -2341,14 +2332,8 @@ def handle_add_jig_submission(ack, body, client):
     if not jig_size:
         return
 
-    # The dropdown says which phase used the jig; when the modal had no
-    # dropdown the job was still on Field, so Field it is
-    if "phase_block" in vals:
-        target_phase = vals["phase_block"]["jig_phase"]["selected_option"]["value"]
-    else:
-        target_phase = "field_sheeting"
-
-    database.add_jig(task_id, target_phase, jig_size)
+    database.add_jig(task_id, metadata.get("phase") or "field_sheeting", jig_size,
+                     part=metadata.get("part"))
     task = database.get_task(task_id)
 
     # The job can disappear between opening the modal and submitting it -
@@ -2375,7 +2360,7 @@ def handle_add_jig_submission(ack, body, client):
 @app.action("trk_delete_task")
 def handle_delete(ack, body, client):
     ack()
-    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
+    task_id, part, _phase, _activity = read_work_value(body["actions"][0]["value"])
     user_id = body["user"]["id"]
     task = database.get_task(task_id)
     channel_id = body["container"]["channel_id"]
@@ -2427,7 +2412,7 @@ def handle_delete(ack, body, client):
 @app.action("trk_edit_task")
 def handle_edit(ack, body, client):
     ack()
-    task_id, _phase, _activity = read_work_value(body["actions"][0]["value"])
+    task_id, part, _phase, _activity = read_work_value(body["actions"][0]["value"])
     user_id = body["user"]["id"]
     task = database.get_task(task_id)
     channel_id = body["container"]["channel_id"]
