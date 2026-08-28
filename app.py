@@ -809,16 +809,19 @@ def card_actions(task):
             and not work_elapsed(task, part, phase, "production")
         )
         if untouched and phase != "packing":
-            # A sheeting lane nobody has started yet. Setup comes first, and
-            # the sheeting is right beside it for a lane that needs no
-            # preparing.
+            # A lane nobody has started yet. Setup is the ONLY way in.
+            #
+            # This used to offer the sheeting beside it, "for a lane that needs
+            # no preparing" - which quietly made setup skippable, and let a
+            # first entry land straight in sheeting with no setup ever timed.
+            # Setup and sheeting are two activities and two presses; the second
+            # one is a decision the maker makes once they have been through the
+            # first. Once setup has any time on it the else-branch below offers
+            # "Resume <lane> setup" AND "Start <lane> sheeting", which is the
+            # point at which that choice is a real one.
             buttons.append(_start_button(
                 "Start " + lower_name(work_name(phase, "setup", part_label(task, part))),
                 task_id, part, phase, "setup", style="primary",
-            ))
-            buttons.append(_start_button(
-                "Start " + lower_name(work_name(phase, "production", part_label(task, part))),
-                task_id, part, phase, "production",
             ))
         else:
             # "Resume" only where there is something to resume; a lane with no
