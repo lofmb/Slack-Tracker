@@ -364,15 +364,24 @@ def other_work_rows(task, already_offered=()):
     The job is not a wizard. A maker preparing Part 1's field may need Part 2's
     border first, may come back, may pack in between - and none of that
     finishes what they moved away from. Each row is that piece's available
-    work, as buttons: the press IS the choice, and a button that says "Start
-    border setup" needs no screen to explain itself.
+    work, as buttons: the press IS the choice.
 
-    Grouped per piece for two reasons, one of them structural. Reading: three
-    pieces' worth of buttons in one strip is a wall the maker has to parse.
-    And Slack requires an action_id to be unique WITHIN ITS BLOCK - Part 1's
-    field sheeting and Part 2's field sheeting share an id, so side by side in
-    one block the card would not render at all. A block per piece makes the ids
-    unique by construction, with no per-piece id space to invent.
+    ONE BUTTON PER LANE, not one per activity. Offering a setup and a sheeting
+    for every lane of every piece put twelve buttons on a three-part card, most
+    of them saying the same two words - a wall to read at a bench, and on a
+    phone every one of them wrapped. A lane is somewhere to go; the choice
+    between preparing it and sheeting it belongs where the maker already is,
+    which is the row above, where "Start field sheeting" already sits next to
+    "Pause setup".
+
+    The button drops the piece's name, because the row it is in already carries
+    it: "Part 2" over "Field" and "Border" reads; "Part 2" over "Part 2 field
+    setup" is the same words twice.
+
+    Grouped per piece for two reasons, one of them structural. Reading, as
+    above. And Slack requires an action_id to be unique WITHIN ITS BLOCK - Part
+    1's field and Part 2's field share one, so side by side in a single block
+    the card would not render at all.
 
     Returns [(heading or None, [buttons])].
     """
@@ -385,9 +394,11 @@ def other_work_rows(task, already_offered=()):
     by_part = {}
     for destination in switch_destinations(task):
         part, phase, activity = destination["part"], destination["phase"], destination["activity"]
-        # The row above already offers the forward move out of a setup, and
-        # the way back onto a paused lane. Repeating either here would be the
-        # same press twice, which reads as two different things to do.
+        # One entry per LANE. The activity the button carries is where that
+        # lane is up to: its setup when nothing has been done on it, and its
+        # sheeting once there is sheeting to come back to.
+        if activity != lane_entry_activity(task, part, phase):
+            continue
         if work_value(task_id, part, phase, activity) in already_offered:
             continue
         # The lane the job's cursor is on leads, because after a packing
@@ -396,10 +407,14 @@ def other_work_rows(task, already_offered=()):
         leading = (
             phase == cursor_phase
             and part == cursor_part
-            and activity == "production"
             and not (phase == here.get("phase") and part == here.get("part"))
         )
-        label = work_name(phase, activity, part_label(task, part))
+        if phase == "packing":
+            label = "Packing"
+        elif multi:
+            label = LANE_NAMES[phase]
+        else:
+            label = work_name(phase, activity)
         if leading and work_elapsed(task, part, phase, activity):
             label = "Back to " + lower_name(label)
         by_part.setdefault(part, []).append(_start_button(
@@ -409,11 +424,28 @@ def other_work_rows(task, already_offered=()):
     rows = []
     for part in sorted(by_part, key=lambda p: (p is None, p or 0)):
         if part is None:
-            heading = "*The job* - packing" if multi else None
+            heading = "*The job*" if multi else None
         else:
             heading = f"*Part {part}*  {_part_shape(task, part)}" if multi else None
         rows.append((heading, by_part[part]))
     return rows
+
+
+def lane_entry_activity(task, part, phase):
+    """
+    Where a lane is up to, as the activity a maker returning to it would want.
+
+    Nothing done yet: the setup, because that is what starting a lane is.
+    Sheeting already recorded: the sheeting, because that is what coming back
+    to it means. Packing has no setup at all.
+    """
+    if phase == "packing":
+        return "production"
+    if work_elapsed(task, part, phase, "production"):
+        return "production"
+    if work_elapsed(task, part, phase, "setup"):
+        return "setup"
+    return "setup"
 
 
 def _part_shape(task, part):
@@ -834,10 +866,16 @@ def _status_lines(task):
             else:
                 name = work_name(last["phase"], last["activity"], part_label(task, last.get("part")))
                 recorded = work_elapsed(task, last.get("part"), last["phase"], last["activity"])
-            lines.append(
-                "Last on " + lower_name(name) + ", "
-                + database.format_duration(recorded) + " recorded."
-            )
+            # A figure of nought says less than no figure: it reads as a timer
+            # that did not work, when what happened is that the maker moved on
+            # before a second had passed.
+            if recorded:
+                lines.append(
+                    "Last on " + lower_name(name) + ", "
+                    + database.format_duration(recorded) + " recorded."
+                )
+            else:
+                lines.append("Last on " + lower_name(name) + ".")
         return lines
 
     if here["phase"] == "job_setup":
@@ -1209,8 +1247,9 @@ def job_card(task, note=None):
         # closes a timer left running overnight. Pause is already on the card;
         # this says, where the risk actually is, what it is for.
         footer += "  ·  Pause if you stop working - you can pick it up again any time."
-    if rows:
-        footer += "  ·  Moving to other work, or pausing, never finishes anything."
+    # No "moving finishes nothing" line here: the row above says exactly that,
+    # and a card that says the same sentence twice reads as a card nobody
+    # edited.
     blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]})
 
     if not here:
