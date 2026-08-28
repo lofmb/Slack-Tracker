@@ -168,7 +168,11 @@ FINISH_LABELS = {
 # job that is running looks the same wherever it is seen; changing one of these
 # changes both, which is the point of them being here rather than inline.
 MARK_RUNNING = "🟢"
-MARK_PAUSED = "⏸"
+# The pause bars are the one of the four that defaults to TEXT presentation, so
+# they need the variation selector after them or they draw as a thin monochrome
+# glyph beside three coloured ones - or, where the font has no such glyph, as a
+# box. The others carry their own emoji presentation already.
+MARK_PAUSED = "⏸️"
 MARK_CUTTING = "✂️"
 MARK_FINISHED = "✅"
 
