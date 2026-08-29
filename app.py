@@ -485,7 +485,12 @@ def lane_needs_details(task, part, phase):
     """
     # Packing has none. It is fetch-box-and-pack: there is no design to name
     # and no difficulty to give it, and asking would be inventing a question.
-    if phase == "packing":
+    #
+    # Nor has the job's own opening setup, for the same reason and one more:
+    # it is not a lane at all, so lane_of would answer with the border's row
+    # and, finding no design on it, send the maker a form about a piece of the
+    # diagram when what they pressed was "carry on getting the job ready".
+    if phase in ("packing", "job_setup"):
         return False
     lane = lane_of(task, part, phase)
     if not lane.get("present", True):
@@ -493,6 +498,36 @@ def lane_needs_details(task, part, phase):
     if lane.get("state") == "complete":
         return False
     return not lane.get("design")
+
+
+def initial_setup_resumable(task):
+    """
+    Whether the job's own opening setup is still something to carry on with.
+
+    A maker who starts setting a job up and stops for the day must be able to
+    continue THAT setup later. Pressing Pause is not a decision to abandon it.
+
+    But it stays the OPENING setup: once the job has genuinely moved on, it is
+    over as a destination and never comes back. So all three must hold, and all
+    three are read from the timing the card already reads - the segment ledger
+    is the evidence and there is no second record of this:
+
+      the opening setup has time on it   (it really started)
+      nothing is being timed             (it really stopped)
+      no other work has any time at all  (the job has not moved on)
+
+    That last one is the whole safeguard. It is deliberately not "is the cursor
+    still early" or "does the card look like the beginning": a lane with one
+    second on it means the maker left, and leaving is a decision.
+    """
+    if task.get("working_on"):
+        return False
+    if not (task.get("job_setup_elapsed") or 0):
+        return False
+    return not any(
+        work_elapsed(task, part, phase, activity)
+        for part, phase, activity in every_work(task)
+    )
 
 
 def resume_target(task):
@@ -578,6 +613,9 @@ START_ACTION_IDS = {
     ("border_sheeting", "setup"): "trk_start_border_setup",
     ("border_sheeting", "production"): "trk_start_border_production",
     ("packing", "production"): "trk_start_packing_production",
+    # The job's own opening setup. No old card carries this one - the button
+    # did not exist before - so there is nothing to stay compatible with.
+    ("job_setup", "setup"): "trk_start_job_setup",
 }
 
 
@@ -801,6 +839,23 @@ def card_actions(task):
         return buttons
 
     # Nothing is being timed.
+    #
+    # The job's own opening setup comes first, when it is still live work. It
+    # is what the maker was doing, so it is the forward move; the lanes are
+    # somewhere ELSE to go and belong under the rule with the rest of the job.
+    # Taking that press is what ends the opening setup as a destination - which
+    # is the hierarchy saying so, rather than a line of prose explaining it.
+    if initial_setup_resumable(task):
+        buttons.append(_start_button(
+            "Resume initial setup", task_id, None, "job_setup", "setup",
+            style="primary",
+        ))
+        # No finish check here: if the opening setup is still resumable then no
+        # lane has a second on it, so none can be complete and the job cannot
+        # be finishable. Adding it would be dead code that risks a second
+        # highlighted button.
+        return buttons
+
     resume = resume_target(task)
     if resume:
         part, phase, activity = resume
@@ -1960,6 +2015,7 @@ def handle_step_2(ack, body, client):
 @app.action("trk_start_field_production")
 @app.action("trk_start_border_setup")
 @app.action("trk_start_border_production")
+@app.action("trk_start_job_setup")
 @app.action("trk_start_packing_production")
 # The two ids cards used before every piece of work had its own. A card posted
 # under the older scheme is still sitting in a maker's DM and still clickable.
