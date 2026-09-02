@@ -550,7 +550,7 @@ def resume_target(task):
 
     Read from the ledger rather than assumed, because the last thing they were
     doing is not always the lane the job is on - an assembler who stopped packing
-    mid-field is paused on the packing. Two fallbacks follow, in the order a
+    mid-field is paused on the packing. Two fallbacks follow, in the order an
     assembler would think of them: the lane the cursor is on, and then the first
     unfinished work anywhere on the job. The last of those matters now that a
     job can have several parts - the cursor's own lane may be finished while
@@ -787,7 +787,7 @@ def card_actions(task):
     Only that. Everything else on the job is a row of its own below, one per
     part, so this strip stays short enough to read at a bench. Looking after
     the job itself - correcting its details, taking it off the list - is not
-    work, and sits in its own row at the foot rather than among the presses a
+    work, and sits in its own row at the foot rather than among the presses an
     assembler makes while sheeting.
 
     At most one button here is ever highlighted: the forward move. Where there
