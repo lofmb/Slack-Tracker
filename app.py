@@ -1442,22 +1442,36 @@ def resolve_job(client, body, task_id, user_id, channel_id):
     return task
 
 
-def busy_elsewhere_text(user_id):
+def busy_elsewhere_text(active):
     """
     The one sentence a maker gets when they try to start work while a
     DIFFERENT job of theirs is being timed: which job it is, and that Pause on
     that job is what frees them. Nothing is switched or paused on their behalf.
 
-    Read fresh from the ledger so the number is the job that is timing NOW,
-    not the one the stale card in front of them last knew about.
+    `active` is the job being timed, as get_active_task returns it - read
+    fresh, so the number is the job that is timing NOW rather than the one a
+    stale card last knew about. None means it stopped in the meantime.
     """
-    active = database.get_active_task(user_id)
     if active:
         return (
             "You're already working on T-" + str(active["task_id"]) + " "
             + active["customer_name"] + ". Pause that job before starting this one."
         )
     return "You're already working on another job. Pause that one before starting this."
+
+
+def busy_elsewhere(client, task, user_id, channel_id):
+    """
+    Is this maker timing a DIFFERENT job right now? Then say so and answer
+    True, so the press stops here - before a form opens that would be filled
+    in for nothing. LMSA refuses the start itself either way; this only spares
+    the maker the form.
+    """
+    active = database.get_active_task(user_id)
+    if not active or active["task_id"] == task["task_id"]:
+        return False
+    client.chat_postEphemeral(channel=channel_id, user=user_id, text=busy_elsewhere_text(active))
+    return True
 
 
 def refusal_text(reason, task, phase=None):
@@ -1470,7 +1484,7 @@ def refusal_text(reason, task, phase=None):
     never a reason code, and never nothing at all.
     """
     if reason == "another_job_running":
-        return busy_elsewhere_text(task["user_id"])
+        return busy_elsewhere_text(database.get_active_task(task["user_id"]))
     lane = work_name(phase or task["current_phase"], "production").lower()
     here = task.get("working_on")
     doing = work_name(here["phase"], here["activity"]).lower() if here else None
@@ -1553,11 +1567,12 @@ def track_command(ack, body, client):
     # setup clock, so a maker who is timing another job right now is told
     # which one, and that Pause on it is what frees them. Nothing is paused
     # on their behalf.
-    if database.get_active_task(user_id):
+    active = database.get_active_task(user_id)
+    if active:
         client.chat_postEphemeral(
             channel=body["channel_id"],
             user=user_id,
-            text=busy_elsewhere_text(user_id),
+            text=busy_elsewhere_text(active),
         )
         return
     # The first of the two intake forms. private_metadata carries the channel
@@ -2003,7 +2018,7 @@ def handle_step_2(ack, body, client):
         client.chat_postEphemeral(
             channel=team_channel_id,
             user=user_id,
-            text=busy_elsewhere_text(user_id),
+            text=busy_elsewhere_text(database.get_active_task(user_id)),
         )
         return
 
@@ -2078,6 +2093,12 @@ def handle_start(ack, body, client):
 
     task = resolve_job(client, body, task_id, user_id, channel_id)
     if task is None:
+        return
+    # A card can be pressed while a different job is being timed - the maker
+    # found an old card in their DM. Refused before any form opens: the timer
+    # they are running has to be paused first, and nothing here does that for
+    # them.
+    if busy_elsewhere(client, task, user_id, channel_id):
         return
 
     phase = phase or task["current_phase"]
@@ -2207,6 +2228,10 @@ def handle_lane_details(ack, body, client):
 
     task = resolve_job(client, body, task_id, user_id, channel_id)
     if task is None:
+        return
+    # The form may have sat open while the maker resumed another job from its
+    # card. Nothing is recorded for a press that cannot start.
+    if busy_elsewhere(client, task, user_id, channel_id):
         return
 
     # The details are written against the lane whichever it is - the same call
