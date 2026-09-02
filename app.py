@@ -1,8 +1,8 @@
 """
-The Slack side of the workshop tracker: what a maker sees, and what happens
+The Slack side of the workshop tracker: what an assembler sees, and what happens
 when they press it.
 
-This file owns the conversation with the maker. It builds the working card and
+This file owns the conversation with the assembler. It builds the working card and
 the forms, decides which buttons a job should be offering, reads what comes
 back, and says no in words when a job cannot do what was asked. It holds no
 data of its own: every durable operation goes to database.py, which is the
@@ -10,7 +10,7 @@ other half of the tracker and talks to LMSA.
 
 A handler here reads the same way throughout:
 
-    the maker presses something
+    the assembler presses something
         -> work out which job, and whether it is theirs to touch
             -> check what the job actually allows
                 -> ask database.py to record it
@@ -18,7 +18,7 @@ A handler here reads the same way throughout:
 
 The job runs Field -> Border -> Packing. Field and Border each carry setup and
 sheeting underneath them, cutting is measured inside sheeting, and exactly one
-piece of work accrues at a time. Those rules belong to the job, not to this
+item of work accrues at a time. Those rules belong to the job, not to this
 file; the sections below say where each part of the conversation lives.
 """
 
@@ -122,12 +122,12 @@ def border_time_display(task):
 
 
 # ---------------------------------------------------------------------------
-# The card the maker works from
+# The card the assembler works from
 # ---------------------------------------------------------------------------
 #
 # ONE card, built from what the job actually is, so every route through the
 # workflow shows the same thing and a change to it cannot land on one path and
-# miss another. It answers four questions, in the order a maker asks them:
+# miss another. It answers four questions, in the order an assembler asks them:
 #
 #     Which job is this?          the header
 #     What am I working on?       the status line
@@ -137,7 +137,7 @@ def border_time_display(task):
 # Everything else the job knows is grouped underneath, because giving every
 # field the same weight is what turns a card into a wall of text.
 
-# What each piece of work is called wherever the maker sees it. Setup and
+# What each item of work is called wherever the assembler sees it. Setup and
 # sheeting share a lane, so a name has to say both which lane and which work.
 WORK_NAMES = {
     ("field_sheeting", "setup"): "Field setup",
@@ -147,7 +147,7 @@ WORK_NAMES = {
     ("packing", "production"): "Packing",
 }
 
-# The lane itself, as opposed to a piece of work inside it. Used where a figure
+# The lane itself, as opposed to an item of work inside it. Used where a figure
 # covers the whole lane - its setup and its sheeting together - so that number
 # is never labelled with the name of one of its halves.
 LANE_NAMES = {
@@ -163,7 +163,7 @@ FINISH_LABELS = {
     "packing": "Packing finished",
 }
 
-# What state a job is in, as a mark a maker reads from three feet away without
+# What state a job is in, as a mark an assembler reads from three feet away without
 # reading anything. The card and the workshop channel use the same four, so a
 # job that is running looks the same wherever it is seen; changing one of these
 # changes both, which is the point of them being here rather than inline.
@@ -179,39 +179,40 @@ MARK_FINISHED = "✅"
 
 def work_name(phase, activity, part=None):
     """
-    What to call a piece of work, in the words the card uses.
+    What to call an item of work, in the words the card uses.
 
-    `part` prefixes the piece when the job has more than one, because on a job
-    drawn as three pieces "Border sheeting" names three different jobs of work
-    and the maker has to be told which. On a single-piece job the prefix would
+    `part` prefixes the part when the job has more than one, because on a job
+    drawn as three parts "Border sheeting" names three different jobs of work
+    and the assembler has to be told which. On a single-part job the prefix would
     be noise - there is nothing to tell it apart from - so callers pass None.
     """
     name = WORK_NAMES.get((phase, activity), "Work")
     if part is None:
         return name
-    return f"Part {part} {name.lower()}"
+    return f"Part {part} {name}"
 
 
 def lower_name(name):
     """
-    A work name as it reads inside a sentence: "start field sheeting".
+    A work name as it reads inside a sentence: "start Field sheeting".
 
-    "Part" keeps its capital, because it is the name of the piece rather than a
-    word in the sentence - "Start part 2 border setup" reads as a typo, and
-    lowercasing a proper noun to fit a template is how it happened.
+    "Part", "Field" and "Border" keep their capitals: they are the names of
+    the things the assembler works on, not words in the sentence, and the
+    workshop writes them that way. Only a plain activity word - packing - is
+    lowercased to sit inside a sentence.
     """
-    if name.startswith("Part "):
+    if name.startswith(("Part ", "Field", "Border")):
         return name
     return name[0].lower() + name[1:]
 
 
 def part_label(task, part):
     """
-    "Part 2", or nothing at all on a job drawn as one piece.
+    "Part 2", or nothing at all on a job drawn as one part.
 
-    Every naming decision on the card goes through this, so a single-piece job
-    reads exactly as it did before pieces existed and a multi-piece one says
-    which piece throughout.
+    Every naming decision on the card goes through this, so a single-part job
+    reads exactly as it did before parts existed and a multi-part one says
+    which part throughout.
     """
     if part is None or (task.get("part_count") or 1) < 2:
         return None
@@ -223,10 +224,10 @@ def work_value(task_id, part=None, phase=None, activity=None):
     What a button carries.
 
     A bare number still means "this job", which is what Edit, Delete and the
-    rest need. A button that moves the maker onto a particular piece of work
-    names it in full - the job, the piece, the lane and the activity - so the
+    rest need. A button that moves the assembler onto a particular item of work
+    names it in full - the job, the part, the lane and the activity - so the
     handler never has to guess which of a job's three borders was meant. The
-    two job-level phases, the opening setup and packing, carry an empty piece.
+    two job-level phases, the opening setup and packing, carry an empty part.
     """
     if phase is None:
         return str(task_id)
@@ -240,10 +241,10 @@ def read_work_value(raw):
     Three shapes, because a card posted by an earlier version of the tracker is
     still sitting in somebody's DM and still clickable:
       "12"                            the job, nothing else
-      "12|border_sheeting|production"  a lane, before pieces were named
-      "12|2|border_sheeting|production"   a lane on a piece
-    The middle one answers None for the piece, which every caller then resolves
-    to the piece the cursor is on - the only piece such a card could have meant.
+      "12|border_sheeting|production"  a lane, before parts were named
+      "12|2|border_sheeting|production"   a lane on a part
+    The middle one answers None for the part, which every caller then resolves
+    to the part the cursor is on - the only part such a card could have meant.
     """
     fields = str(raw).split("|")
     task_id = int(fields[0])
@@ -256,7 +257,7 @@ def read_work_value(raw):
 
 
 def lanes_of(task, part):
-    """One piece's two lanes, as {"field": {...}, "border": {...}}."""
+    """One part's two lanes, as {"field": {...}, "border": {...}}."""
     for row in task.get("parts") or []:
         if row.get("part") == part:
             return row
@@ -265,9 +266,9 @@ def lanes_of(task, part):
 
 def lane_of(task, part, phase):
     """
-    One lane on one piece.
+    One lane on one part.
 
-    Packing is the job's and is not on a piece, so it answers from the flat
+    Packing is the job's and is not on a part, so it answers from the flat
     keys - the only lane that does.
     """
     if phase == "packing":
@@ -300,7 +301,7 @@ def lane_open(task, part, phase):
 
 def work_elapsed(task, part, phase, activity):
     """
-    Seconds recorded against one piece of work.
+    Seconds recorded against one item of work.
 
     Packing has no setup, so asking for its setup is nought - not the packing
     total over again. Anything that adds a lane's two activities together
@@ -314,11 +315,11 @@ def work_elapsed(task, part, phase, activity):
 
 def every_work(task):
     """
-    Every piece of work this job contains, in the order the maker reads it.
+    Every item of work this job contains, in the order the assembler reads it.
 
     Each entry is (part, phase, activity). Packing comes last and belongs to
-    no piece. This is the one place the job's shape is enumerated, so nothing
-    downstream has to know how many pieces there are or which lanes they have.
+    no part. This is the one place the job's shape is enumerated, so nothing
+    downstream has to know how many parts there are or which lanes they have.
     """
     out = []
     for row in task.get("parts") or []:
@@ -332,17 +333,17 @@ def every_work(task):
 
 def switch_destinations(task):
     """
-    The work the maker may move to from here.
+    The work the assembler may move to from here.
 
     Derived from the job rather than listed per card. A lane that is finished,
-    or that the maker declared did not happen, is not somewhere to go; a border
+    or that the assembler declared did not happen, is not somewhere to go; a border
     nobody has described yet has not been reached; and packing has no setup.
-    Whatever survives is offered, and the maker's press is what chooses.
+    Whatever survives is offered, and the assembler's press is what chooses.
     """
     here = task.get("working_on") or {}
     out = []
     for part, phase, activity in every_work(task):
-        # The LANE the maker is on is not somewhere to move to, whichever of its
+        # The LANE the assembler is on is not somewhere to move to, whichever of its
         # two activities they are holding. Comparing the activity as well left a
         # lane offering itself: in the first seconds of a sheeting run nothing
         # has accrued yet, so the lane still reads as being at its setup, and
@@ -353,7 +354,7 @@ def switch_destinations(task):
             continue
         # A lane is described on the way in now, not before it can be reached,
         # so an undescribed border is somewhere to go - the form opens when the
-        # maker gets there. What is NOT somewhere to go is a lane the diagram
+        # assembler gets there. What is NOT somewhere to go is a lane the diagram
         # does not have, which lane_open has already dropped.
         out.append({"part": part, "phase": phase, "activity": activity})
     return out
@@ -361,38 +362,38 @@ def switch_destinations(task):
 
 def other_work_rows(task, already_offered=()):
     """
-    The rest of the job, grouped the way the diagram is: one row per piece.
+    The rest of the job, grouped the way the diagram is: one row per part.
 
-    The job is not a wizard. A maker preparing Part 1's field may need Part 2's
+    The job is not a wizard. An assembler preparing Part 1's field may need Part 2's
     border first, may come back, may pack in between - and none of that
-    finishes what they moved away from. Each row is that piece's available
+    finishes what they moved away from. Each row is that part's available
     work, as buttons: the press IS the choice.
 
     ONE BUTTON PER LANE, not one per activity. Offering a setup and a sheeting
-    for every lane of every piece put twelve buttons on a three-part card, most
+    for every lane of every part put twelve buttons on a three-part card, most
     of them saying the same two words - a wall to read at a bench, and on a
     phone every one of them wrapped. A lane is somewhere to go; the choice
-    between preparing it and sheeting it belongs where the maker already is,
+    between preparing it and sheeting it belongs where the assembler already is,
     which is the row above, where "Start field sheeting" already sits next to
     "Pause setup".
 
-    The button drops the piece's name, because the row it is in already carries
+    The button drops the part's name, because the row it is in already carries
     it: "Part 2" over "Field" and "Border" reads; "Part 2" over "Part 2 field
     setup" is the same words twice.
 
-    The control says everything about the lane that a maker needs here. "Field"
+    The control says everything about the lane that an assembler needs here. "Field"
     is a lane nobody has opened; "Back to field" is one with time already on it.
     That is the whole of what a line of prose above the row used to say, and it
     is read in the same glance as the press rather than above it.
 
     NOTHING HERE IS EVER THE HIGHLIGHTED BUTTON. Every press in this section
-    pauses the work the maker is holding, and a card should not colour in the
+    pauses the work the assembler is holding, and a card should not colour in the
     one move that stops what they are doing.
 
-    Grouped per piece for two reasons, one of them structural. Reading, as
+    Grouped per part for two reasons, one of them structural. Reading, as
     above. And Slack requires an action_id to be unique WITHIN ITS BLOCK - Part
     1's field and Part 2's field share one, so side by side in a single block
-    the card would not render at all. A job drawn as one piece has no such
+    the card would not render at all. A job drawn as one part has no such
     clash and no headings to sit under, so its rows are merged into one.
 
     Returns [(heading or None, [buttons])].
@@ -413,14 +414,20 @@ def other_work_rows(task, already_offered=()):
         recorded = (work_elapsed(task, part, phase, "setup")
                     + work_elapsed(task, part, phase, "production"))
         if phase == "packing":
-            # Packing is the job's, so its button says so rather than leaning on
-            # a heading to explain what it belongs to. "Back to pack the job" is
-            # not English, so this one names its own return.
+            # Packing is the JOB's, not a part's, so its button says so rather
+            # than leaning on a heading to explain what it belongs to. "Back to
+            # pack the job" is not English, so this one names its own return.
             label = "Back to packing" if recorded else "Pack the job"
         else:
+            # The button says which part it belongs to - "Part 2 Field" - so
+            # on a phone its ownership is read in the same glance as the press,
+            # not looked up from a heading above it. A one-part job has nothing
+            # to tell apart, so it says "Field".
             label = LANE_NAMES[phase]
+            if multi:
+                label = f"Part {part} {label}"
             if recorded:
-                label = "Back to " + lower_name(label)
+                label = "Back to " + label
         by_part.setdefault(part, []).append(
             _start_button(label, task_id, part, phase, activity)
         )
@@ -429,15 +436,20 @@ def other_work_rows(task, already_offered=()):
     if not multi:
         merged = [button for part in ordered for button in by_part[part]]
         return [(None, merged)] if merged else []
+    # A heading appears only when it has something the buttons cannot say: a
+    # tick for each of the part's lanes that is FINISHED. The buttons already
+    # name their part, so a heading with nothing to add would say it twice.
     return [
-        (f"*Part {part}*{_part_ticks(task, part)}" if part is not None else None, by_part[part])
+        (f"*Part {part}*{_part_ticks(task, part)}"
+         if part is not None and _part_ticks(task, part) else None,
+         by_part[part])
         for part in ordered
     ]
 
 
 def lane_entry_activity(task, part, phase):
     """
-    Where a lane is up to, as the activity a maker returning to it would want.
+    Where a lane is up to, as the activity an assembler returning to it would want.
 
     Nothing done yet: the setup, because that is what starting a lane is.
     Sheeting already recorded: the sheeting, because that is what coming back
@@ -454,13 +466,13 @@ def lane_entry_activity(task, part, phase):
 
 def _part_ticks(task, part):
     """
-    A tick beside a piece for each of its lanes that is finished.
+    A tick beside a part for each of its lanes that is finished.
 
     The one thing the buttons underneath genuinely cannot say. An open lane is
     a button, a started one says "Back to"; but a lane that is DONE has no
     button at all, and bare absence reads the same as a lane the diagram never
     had. A mark on a heading already on screen settles that without describing
-    the piece back to a maker who is looking at it.
+    the part back to an assembler who is looking at it.
     """
     return "".join(
         "   ✓ " + LANE_NAMES[phase]
@@ -479,7 +491,7 @@ def lane_needs_details(task, part, phase):
     Whether this lane still has to be described before it can be worked.
 
     A design and a difficulty are asked for on FIRST ENTRY to a lane, which is
-    the moment the maker is looking at that piece. Before pieces existed the
+    the moment the assembler is looking at that part. Before parts existed the
     border was described in a form reached by finishing the field; now every
     lane is described the same way, on the way in.
     """
@@ -488,7 +500,7 @@ def lane_needs_details(task, part, phase):
     #
     # Nor has the job's own opening setup, for the same reason and one more:
     # it is not a lane at all, so lane_of would answer with the border's row
-    # and, finding no design on it, send the maker a form about a piece of the
+    # and, finding no design on it, send the assembler a form about a part of the
     # diagram when what they pressed was "carry on getting the job ready".
     if phase in ("packing", "job_setup"):
         return False
@@ -504,7 +516,7 @@ def initial_setup_resumable(task):
     """
     Whether the job's own opening setup is still something to carry on with.
 
-    A maker who starts setting a job up and stops for the day must be able to
+    An assembler who starts setting a job up and stops for the day must be able to
     continue THAT setup later. Pressing Pause is not a decision to abandon it.
 
     But it stays the OPENING setup: once the job has genuinely moved on, it is
@@ -518,7 +530,7 @@ def initial_setup_resumable(task):
 
     That last one is the whole safeguard. It is deliberately not "is the cursor
     still early" or "does the card look like the beginning": a lane with one
-    second on it means the maker left, and leaving is a decision.
+    second on it means the assembler left, and leaving is a decision.
     """
     if task.get("working_on"):
         return False
@@ -532,16 +544,16 @@ def initial_setup_resumable(task):
 
 def resume_target(task):
     """
-    What Resume means on a paused card: the last thing the maker was doing.
+    What Resume means on a paused card: the last thing the assembler was doing.
 
     Returns (part, phase, activity), or None when there is nothing to resume.
 
     Read from the ledger rather than assumed, because the last thing they were
-    doing is not always the lane the job is on - a maker who stopped packing
+    doing is not always the lane the job is on - an assembler who stopped packing
     mid-field is paused on the packing. Two fallbacks follow, in the order a
-    maker would think of them: the lane the cursor is on, and then the first
+    assembler would think of them: the lane the cursor is on, and then the first
     unfinished work anywhere on the job. The last of those matters now that a
-    job can have several pieces - the cursor's own lane may be finished while
+    job can have several parts - the cursor's own lane may be finished while
     Part 3 has not been touched, and answering None there would leave a paused
     card with nothing to press.
 
@@ -573,7 +585,7 @@ def header_text(task, suffix=""):
     """
     "T-12  Customer Name", trimmed to something Slack will accept.
 
-    The job number and any suffix are never what gets cut: they are how a maker
+    The job number and any suffix are never what gets cut: they are how an assembler
     finds the card. This heads the CLOSED card, where the job is what the card
     is about; a card still being worked heads with the work instead and carries
     the customer's full name in its foot.
@@ -600,8 +612,8 @@ def _button(text, action_id, value, style=None, confirm=None):
     return button
 
 
-# One action_id per piece of work. Slack requires an action_id to be unique
-# within its block, and a card now offers every piece of unfinished work on the
+# One action_id per item of work. Slack requires an action_id to be unique
+# within its block, and a card now offers every part of unfinished work on the
 # job side by side - field sheeting next to border setup next to packing. Ids
 # that said only "setup" or "production" collided the moment two lanes were
 # offered together, which is the defect that stopped a card rendering at all.
@@ -621,12 +633,12 @@ START_ACTION_IDS = {
 
 def _start_button(text, task_id, part, phase, activity, style=None):
     """
-    A button that opens a piece of work and starts timing it.
+    A button that opens an item of work and starts timing it.
 
     Five action ids, one per lane-and-activity, whatever the job's shape. They
-    stay unique because each piece's buttons live in their OWN actions block -
-    Slack scopes an action_id to its block - so a job drawn as ten pieces needs
-    no ids that a job drawn as two did not. The value carries which piece.
+    stay unique because each part's buttons live in their OWN actions block -
+    Slack scopes an action_id to its block - so a job drawn as ten parts needs
+    no ids that a job drawn as two did not. The value carries which part.
     """
     action_id = START_ACTION_IDS.get(
         (phase, activity),
@@ -644,7 +656,7 @@ def _jig_button(task):
     because "Add" reads as a second one, and the first time there is nothing to
     add to.
 
-    Offered only while the maker is ON a lane, because the jig belongs to the
+    Offered only while the assembler is ON a lane, because the jig belongs to the
     lane being worked and a card that is not on one has nothing to attach it to.
     """
     here = task.get("working_on") or {}
@@ -680,9 +692,9 @@ def _finish_button(task, part, phase):
     if not on_it_now and work_elapsed(task, part, phase, "production") <= 0:
         return None
     named = work_name(phase, "production", part_label(task, part))
-    # The heading already says which piece is being worked, so the widest button
+    # The heading already says which part is being worked, so the widest button
     # on the card does not repeat it. The confirmation still names the lane in
-    # full, which is where a maker about to close something for good reads it.
+    # full, which is where an assembler about to close something for good reads it.
     label = FINISH_LABELS[phase]
     return _button(
         label,
@@ -691,7 +703,7 @@ def _finish_button(task, part, phase):
         confirm={
             "title": {"type": "plain_text", "text": "Finished?"},
             # Slack renders a confirmation's text as PLAIN TEXT. Asterisks
-            # meant as emphasis are printed, so the maker read "*field
+            # meant as emphasis are printed, so the assembler read "*field
             # sheeting*" with the asterisks in it.
             "text": {
                 "type": "plain_text",
@@ -708,7 +720,7 @@ def _finish_button(task, part, phase):
 
 
 def job_is_finishable(task):
-    """Every lane on every piece is done or was never there, and packing too."""
+    """Every lane on every part is done or was never there, and packing too."""
     for part, phase, activity in every_work(task):
         if activity != "production":
             continue
@@ -723,9 +735,9 @@ def delete_still_applies(task):
 
     Delete is that correction, and it is only honest while nothing has been
     made yet. The test is what the job has actually PRODUCED, across every
-    piece of it - not which lane it happens to sit on, and not whether the
+    part of it - not which lane it happens to sit on, and not whether the
     opening setup has run, because reading the diagram and discovering it is
-    the wrong job is exactly when a maker needs this button.
+    the wrong job is exactly when an assembler needs this button.
     """
     for part, phase, activity in every_work(task):
         if activity != "production":
@@ -740,9 +752,13 @@ def delete_still_applies(task):
 def _delete_button(task_id):
     # The word, not the behaviour. This has never deleted anything: it cancels
     # and keeps the record (see handle_delete), and every other string the
-    # maker meets already says so - the dialog body, its confirm button, and
+    # assembler meets already says so - the dialog body, its confirm button, and
     # the card they are left with. "Delete" was the last place that did not.
     # The action id is unchanged, so cards already sitting in DMs still work.
+    # Cancel is for a job that should not have been entered. It is NOT how an
+    # assembler frees themselves to work on another job - Pause does that - so
+    # the dialog says only what cancelling does: the job leaves their work
+    # list, its record is kept, and this card cannot bring it back.
     return _button(
         "Cancel job",
         "trk_delete_task",
@@ -753,12 +769,12 @@ def _delete_button(task_id):
             "text": {
                 "type": "plain_text",
                 "text": (
-                    "It comes off your list and you can start another. Any time already "
-                    "recorded stays on the record, but you cannot pick this job back up "
-                    "from here - a supervisor would have to."
+                    "The job is cancelled and comes off your work list. Time and history "
+                    "already recorded are kept. You cannot resume a cancelled job from this "
+                    "card - a supervisor would have to bring it back."
                 ),
             },
-            "confirm": {"type": "plain_text", "text": "Yes, take it off my list"},
+            "confirm": {"type": "plain_text", "text": "Yes, cancel it"},
             "deny": {"type": "plain_text", "text": "Keep it"},
         },
     )
@@ -766,13 +782,13 @@ def _delete_button(task_id):
 
 def card_actions(task):
     """
-    What the maker can do with the work they are HOLDING.
+    What the assembler can do with the work they are HOLDING.
 
     Only that. Everything else on the job is a row of its own below, one per
-    piece, so this strip stays short enough to read at a bench. Looking after
+    part, so this strip stays short enough to read at a bench. Looking after
     the job itself - correcting its details, taking it off the list - is not
     work, and sits in its own row at the foot rather than among the presses a
-    maker makes while sheeting.
+    assembler makes while sheeting.
 
     At most one button here is ever highlighted: the forward move. Where there
     is no forward move there is no highlight.
@@ -783,26 +799,18 @@ def card_actions(task):
     buttons = []
 
     if here and here["phase"] == "job_setup":
-        # Getting the job ready. The forward move is into the first piece of
-        # work the diagram has; everything else is in the rows below.
-        first = next(
-            ((p, ph) for p, ph, act in every_work(task)
-             if act == "production" and lane_open(task, p, ph)),
-            None,
-        )
-        if first:
-            part, phase = first
-            buttons.append(_start_button(
-                "Start " + lower_name(work_name(phase, "setup", part_label(task, part))),
-                task_id, part, phase, "setup", style="primary",
-            ))
+        # Getting the job ready. The job is not a wizard: no lane is the "next"
+        # one, so nothing here is highlighted and no lane is promoted into this
+        # strip. Every Field, Border and the packing sit as equal choices in
+        # the rows below; the only press that belongs to the work in hand is
+        # to stop it.
         buttons.append(_button("Pause setup", "trk_stop_task", work_value(task_id)))
         return buttons
 
     if here and here["activity"] == "setup":
         # Setting a lane up. The forward move is the sheeting itself, and this
         # is the moment the jig becomes known, so both are on the card. The
-        # heading has already said which piece, so the button does not.
+        # heading has already said which part, so the button does not.
         part = here.get("part")
         buttons.append(_start_button(
             "Start " + lower_name(work_name(here["phase"], "production")),
@@ -823,9 +831,9 @@ def card_actions(task):
                                    style="primary"))
         buttons.append(_button("Pause", "trk_stop_task", work_value(task_id)))
         if not cutting and here["phase"] != "packing" and here["activity"] == "production":
-            # Cutting is measured inside THIS piece's sheeting, and takes its
-            # piece from the segment it is inside - so the value names the work
-            # it is happening in rather than asking the maker again.
+            # Cutting is measured inside THIS part's sheeting, and takes its
+            # part from the segment it is inside - so the value names the work
+            # it is happening in rather than asking the assembler again.
             buttons.append(_button(
                 "Start cutting", "trk_start_cutting",
                 work_value(task_id, part, here["phase"], "production"),
@@ -841,7 +849,7 @@ def card_actions(task):
     # Nothing is being timed.
     #
     # The job's own opening setup comes first, when it is still live work. It
-    # is what the maker was doing, so it is the forward move; the lanes are
+    # is what the assembler was doing, so it is the forward move; the lanes are
     # somewhere ELSE to go and belong under the rule with the rest of the job.
     # Taking that press is what ends the opening setup as a destination - which
     # is the hierarchy saying so, rather than a line of prose explaining it.
@@ -859,35 +867,28 @@ def card_actions(task):
     resume = resume_target(task)
     if resume:
         part, phase, activity = resume
-        untouched = (
-            not work_elapsed(task, part, phase, "setup")
-            and not work_elapsed(task, part, phase, "production")
+        touched = (
+            work_elapsed(task, part, phase, "setup")
+            or work_elapsed(task, part, phase, "production")
         )
-        if untouched and phase != "packing":
-            # A lane nobody has started yet. Setup is the ONLY way in.
-            #
-            # This used to offer the sheeting beside it, "for a lane that needs
-            # no preparing" - which quietly made setup skippable, and let a
-            # first entry land straight in sheeting with no setup ever timed.
-            # Setup and sheeting are two activities and two presses; the second
-            # one is a decision the maker makes once they have been through the
-            # first. Once setup has any time on it the else-branch below offers
-            # "Resume <lane> setup" AND "Start <lane> sheeting", which is the
-            # point at which that choice is a real one.
-            buttons.append(_start_button(
-                "Start " + lower_name(work_name(phase, "setup", part_label(task, part))),
-                task_id, part, phase, "setup", style="primary",
-            ))
-        else:
-            # "Resume" only where there is something to resume; a lane with no
-            # time on it is being started, whatever the ledger last recorded.
-            verb = "Resume" if work_elapsed(task, part, phase, activity) else "Start"
+        # A press is highlighted here ONLY when there is recorded work to go
+        # back to: the assembler stopped part-way through something, and
+        # carrying on with it is the forward move. Work nobody has started is
+        # a choice, not a continuation, and choices are the rows below - all
+        # of them, none coloured in. Highlighting "Start Part 1 Field setup"
+        # here made one lane look like the required next step, and the job is
+        # not a wizard.
+        if touched:
             named = work_name(phase, activity, part_label(task, part))
             buttons.append(_start_button(
-                verb + " " + lower_name(named),
+                "Resume " + lower_name(named),
                 task_id, part, phase, activity, style="primary",
             ))
             if activity == "setup":
+                # Setup has been through once, so the sheeting is now a real
+                # choice beside carrying on with the setup. Setup is the ONLY
+                # way INTO a lane; this is the only place the sheeting is
+                # offered before any of it has run.
                 buttons.append(_start_button(
                     "Start " + lower_name(work_name(phase, "production", part_label(task, part))),
                     task_id, part, phase, "production",
@@ -917,7 +918,7 @@ DUE_DATE_ERROR = ("Enter the date as DD/MM/YY, for example 01/09/26. "
 
 def read_due_date(typed):
     """
-    What the maker meant by what they typed in the due date box.
+    What the assembler meant by what they typed in the due date box.
 
     Returns (text to store, error to show them). The text is None when no date
     has been supplied: a blank box, or the "N/A" the old form used to write,
@@ -930,7 +931,7 @@ def read_due_date(typed):
     card says it the same way.
 
     The date has to exist: 31/02/26 is refused here rather than accepted and
-    then rejected by the database, where the maker would see nothing useful.
+    then rejected by the database, where the assembler would see nothing useful.
 
     This governs TYPING ONLY. Rows already holding free text keep it, and are
     read back untouched.
@@ -957,7 +958,7 @@ def read_due_date(typed):
 
 def due_date_supplied(task):
     """
-    The due date the maker was given, or None when nobody has given them one.
+    The due date the assembler was given, or None when nobody has given them one.
 
     Every job needs doing as soon as practicable, so there is no such thing as
     a job with no deadline. There are only jobs where a specific calendar date
@@ -966,7 +967,7 @@ def due_date_supplied(task):
     Rows entered through the old form stored the word "N/A" for that, either as
     the typed text or as a ticked box. It is read as "none supplied" here, at
     the moment it is shown, so an old record reads correctly without anything
-    being rewritten. Anything else the maker typed is theirs and comes back
+    being rewritten. Anything else the assembler typed is theirs and comes back
     untouched - "Friday" and "when the paint arrives" are real answers.
     """
     text = (task.get("due_date") or "").strip()
@@ -984,7 +985,7 @@ def due_date_display(task):
 # Difficulty
 # ---------------------------------------------------------------------------
 # A whole number, up to two digits. Every difficulty ever recorded is one, and
-# the box has always taken two characters - but it never said so, so a maker
+# the box has always taken two characters - but it never said so, so an assembler
 # who answered in words was told only that they had used too many characters.
 # It is deliberately NOT capped at ten: nobody has given us a maximum, and the
 # recorded range only tells us what has been typed so far, not what is allowed.
@@ -1019,14 +1020,14 @@ PART_COUNT_ERROR = "How many parts? A whole number, 1 or more."
 
 def read_part_count(typed):
     """
-    How many pieces the diagram is drawn as.
+    How many parts the diagram is drawn as.
 
     A whole number, at least one, at most two digits. THERE IS NO BUSINESS
     MAXIMUM: two digits is the width of the box, not a rule about how many
-    pieces a job may have, and if a job ever needs more the limit to change is
+    parts a job may have, and if a job ever needs more the limit to change is
     that width.
 
-    Returns (count, error). A blank box means one piece, because that is what
+    Returns (count, error). A blank box means one part, because that is what
     the field is pre-filled with and what most jobs are.
     """
     raw = (typed or "").strip()
@@ -1049,7 +1050,7 @@ def _lane_lines(task, part, phase):
     Setup and sheeting ADD UP to the lane's total. Cutting does not: it is time
     spent inside the sheeting, already counted in it. Listing both after one
     word - "includes 3m 42s setup, 50s cutting" - put two different
-    relationships in one sum, and the arithmetic then did not work: a maker
+    relationships in one sum, and the arithmetic then did not work: an assembler
     adding those two figures came up short of the lane total and had no way to
     see why. So the parts sit under the lane, and the cutting sits under the
     sheeting it happened in.
@@ -1095,11 +1096,11 @@ def _lane_lines(task, part, phase):
 
 def _time_lines(task, total_label="Total job time"):
     """
-    What has been recorded, piece by piece.
+    What has been recorded, part by part.
 
     A lane appears once there is something to say about it, so an early card is
-    short and a late one is complete. The pieces are headed only when there is
-    more than one - on a single-piece job "Part 1" is a heading with nothing to
+    short and a late one is complete. The parts are headed only when there is
+    more than one - on a single-part job "Part 1" is a heading with nothing to
     distinguish it from.
     """
     multi = (task.get("part_count") or 1) > 1
@@ -1108,8 +1109,8 @@ def _time_lines(task, total_label="Total job time"):
     setup = task.get("job_setup_elapsed") or 0
     here = task.get("working_on") or {}
     if setup or here.get("phase") == "job_setup":
-        # The job's own preparation, above the pieces, because that is what it
-        # is: work on the job before any one piece of it.
+        # The job's own preparation, above the parts, because that is what it
+        # is: work on the job before any one part of it.
         rows.append("*Initial setup*  " + database.format_duration(setup))
 
     for row in task.get("parts") or []:
@@ -1124,7 +1125,7 @@ def _time_lines(task, total_label="Total job time"):
 
     rows += _lane_lines(task, None, "packing")
 
-    # Nothing worked yet: the status line has already said what the maker is on
+    # Nothing worked yet: the status line has already said what the assembler is on
     # and how long for, and repeating it under a heading is three noughts and no
     # information.
     if not rows or not task["total_elapsed"]:
@@ -1141,7 +1142,7 @@ def _headline(task):
     Slack's header is the only block with its own type size, so it carries the
     state and nothing else - the job number and the customer have all day to be
     read and sit in the foot. Cutting takes the heading while it runs because
-    that is what the maker is doing, and it names the sheeting it is inside so
+    that is what the assembler is doing, and it names the sheeting it is inside so
     the time is never in doubt.
     """
     here = task.get("working_on")
@@ -1164,7 +1165,7 @@ def _facts_line(task):
 
     The only thing allowed between the work and the buttons, and it earns the
     place by being about the work in hand: which design, how hard, which jig -
-    what a maker checks against the diagram without leaving the bench. Where
+    what an assembler checks against the diagram without leaving the bench. Where
     there is nothing true to put here the line is not drawn; nothing is invented
     to fill it.
 
@@ -1184,7 +1185,7 @@ def _facts_line(task):
             recorded = work_elapsed(task, last.get("part"), last["phase"], last["activity"])
         line = "Last on " + lower_name(name)
         # A figure of nought says less than no figure: it reads as a timer that
-        # did not work, when the maker simply moved on within the second.
+        # did not work, when the assembler simply moved on within the second.
         if recorded:
             line += "  ·  " + database.format_duration(recorded) + " recorded"
         return line
@@ -1208,7 +1209,7 @@ def _admin_actions(task):
     Looking after the job rather than working it: correct it, or take it off
     the list.
 
-    Its own row at the foot, because a maker reaching for Pause should not find
+    Its own row at the foot, because an assembler reaching for Pause should not find
     Delete beside it. Offered in exactly the states that offered it before - a
     card in the middle of sheeting has never carried either, and moving a strip
     around is no reason to start.
@@ -1224,11 +1225,11 @@ def _admin_actions(task):
 
 def _parts_finished(task):
     """
-    How much of a multi-piece job is behind the maker, as (done, total).
+    How much of a multi-part job is behind the assembler, as (done, total).
 
-    None on a job drawn as one piece, where "0 of 1 parts finished" says only
+    None on a job drawn as one part, where "0 of 1 parts finished" says only
     that the job is not finished, which the card has already said - and None
-    again until the first piece is actually done, for the same reason. A piece
+    again until the first part is actually done, for the same reason. A part
     is done when neither of its lanes is still open; a lane the diagram never
     had was never work.
     """
@@ -1267,11 +1268,6 @@ def _foot_lines(task):
         # Only where nothing is accruing, so the figure is final rather than a
         # snapshot that went stale the moment it was drawn.
         second.append(database.format_duration(task["total_elapsed"]) + " on this job")
-    if here.get("activity") == "setup":
-        # A job starts timing its setup the moment it exists, and nothing closes
-        # a timer left running overnight. Pause is already on the card; this
-        # says, where the risk actually is, what it is for.
-        second.append("Pause if you stop working.")
     return [first, "  ·  ".join(second)]
 
 
@@ -1279,7 +1275,7 @@ def job_card(task, note=None):
     """
     The whole card. Returns (fallback text, blocks).
 
-    A WORKING INTERFACE, in the order a maker at a bench asks for it: what am I
+    A WORKING INTERFACE, in the order an assembler at a bench asks for it: what am I
     on, what can I do with it, what else could I move to. The job's own details
     are true all day and are read once, so they go grey at the foot.
 
@@ -1293,7 +1289,7 @@ def job_card(task, note=None):
 
     `note` is a single grey line BELOW the buttons when something just happened
     that the card alone would not explain. Below, because a confirmation must
-    not push the work the maker is holding down the card.
+    not push the work the assembler is holding down the card.
     """
     task_id = task["task_id"]
     blocks = [{
@@ -1316,14 +1312,14 @@ def job_card(task, note=None):
     if note:
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": note}]})
 
-    # The rest of the job, one row per piece. A maker is not walking a wizard:
+    # The rest of the job, one row per part. An assembler is not walking a wizard:
     # while the job is unfinished they can move between whatever work it
     # actually contains, and the card says so rather than hiding it behind a
     # form. What moving DOES is not explained here every time - the buttons
-    # under a heading are the explanation, and a maker who presses one finds out
+    # under a heading are the explanation, and an assembler who presses one finds out
     # once rather than reading it on every render.
     #
-    # Each piece gets its OWN actions block. That is not only for reading:
+    # Each part gets its OWN actions block. That is not only for reading:
     # Slack scopes an action_id to its block, and Part 1's field sheeting and
     # Part 2's field sheeting share one - side by side in a single block the
     # card would not render at all.
@@ -1331,10 +1327,17 @@ def job_card(task, note=None):
                if (b.get("action_id") or "").startswith("trk_start_")}
     rows = other_work_rows(task, offered)
     if rows:
+        # "Other" only while a lane or the packing is actually being worked;
+        # during the job's own setup, or paused, nothing below is "other" -
+        # it is simply the work the job has.
+        here = task.get("working_on") or {}
+        on_a_lane = bool(here) and here.get("phase") != "job_setup"
         blocks.append({"type": "divider"})
         blocks.append({
             "type": "context",
-            "elements": [{"type": "mrkdwn", "text": "*Other work on this job*"}],
+            "elements": [{"type": "mrkdwn",
+                          "text": "*Other work on this job*" if on_a_lane
+                          else "*Work on this job*"}],
         })
         for index, (heading, buttons) in enumerate(rows, start=1):
             if heading:
@@ -1395,7 +1398,7 @@ def repost_card(client, task, channel_id, note=None):
 
     Used at the points where the job genuinely moves on - a lane finished, the
     border decided - because by then the old card has usually scrolled away
-    behind the modal that was just filled in, and a maker should not have to go
+    behind the modal that was just filled in, and an assembler should not have to go
     looking for the job they are working on.
     """
     text, blocks = job_card(task, note=note)
@@ -1413,7 +1416,7 @@ def repost_card(client, task, channel_id, note=None):
 def resolve_job(client, body, task_id, user_id, channel_id):
     """
     The three things every button checks before it does anything: the job is
-    still there, it belongs to this maker, and it is not already finished.
+    still there, it belongs to this assembler, and it is not already finished.
 
     Returns the job, or None having already said why.
     """
@@ -1444,7 +1447,7 @@ def resolve_job(client, body, task_id, user_id, channel_id):
 
 def busy_elsewhere_text(active):
     """
-    The one sentence a maker gets when they try to start work while a
+    The one sentence an assembler gets when they try to start work while a
     DIFFERENT job of theirs is being timed: which job it is, and that Pause on
     that job is what frees them. Nothing is switched or paused on their behalf.
 
@@ -1462,10 +1465,10 @@ def busy_elsewhere_text(active):
 
 def busy_elsewhere(client, task, user_id, channel_id):
     """
-    Is this maker timing a DIFFERENT job right now? Then say so and answer
+    Is this assembler timing a DIFFERENT job right now? Then say so and answer
     True, so the press stops here - before a form opens that would be filled
     in for nothing. LMSA refuses the start itself either way; this only spares
-    the maker the form.
+    the assembler the form.
     """
     active = database.get_active_task(user_id)
     if not active or active["task_id"] == task["task_id"]:
@@ -1478,16 +1481,16 @@ def refusal_text(reason, task, phase=None):
     """
     A refusal, in workshop words: what happened, and what to do about it.
 
-    Every one of these is something a real maker can cause by pressing a
+    Every one of these is something a real assembler can cause by pressing a
     button, usually from a card that has gone stale in another window. So the
     answer says what the job is actually doing now and what to press instead -
     never a reason code, and never nothing at all.
     """
     if reason == "another_job_running":
         return busy_elsewhere_text(database.get_active_task(task["user_id"]))
-    lane = work_name(phase or task["current_phase"], "production").lower()
+    lane = lower_name(work_name(phase or task["current_phase"], "production"))
     here = task.get("working_on")
-    doing = work_name(here["phase"], here["activity"]).lower() if here else None
+    doing = lower_name(work_name(here["phase"], here["activity"])) if here else None
     texts = {
         "already_running": "You are already on that, so nothing has changed.",
         "another_phase_running": (
@@ -1536,7 +1539,7 @@ def track_slack_delivery(body, next):
     # Note which Slack delivery is being handled, so a redelivery of the same
     # click is recognised as the same action rather than applied twice. Scoped
     # to this handler and cleared afterwards, so nothing carries over into the
-    # next request. Changes no behaviour a maker can see.
+    # next request. Changes no behaviour an assembler can see.
     with database.slack_request(body):
         return next()
 
@@ -1562,9 +1565,9 @@ def track_command(ack, body, client):
         handle_export(body,client)
         return
 
-    # One timer at a time per person. A maker may hold several unfinished
+    # One timer at a time per person. An assembler may hold several unfinished
     # jobs - each paused one keeps its card - but creating a job starts its
-    # setup clock, so a maker who is timing another job right now is told
+    # setup clock, so an assembler who is timing another job right now is told
     # which one, and that Pause on it is what frees them. Nothing is paused
     # on their behalf.
     active = database.get_active_task(user_id)
@@ -1637,7 +1640,7 @@ def track_command(ack, body, client):
                         "max_length": 2,
                     },
                     "hint": {"type": "plain_text",
-                             "text": "How many pieces the diagram is drawn as."},
+                             "text": "How many parts the diagram is drawn as."},
                 }
             ]
         }
@@ -1854,10 +1857,10 @@ def handle_step_1(ack,body,client,):
     invoice_number = vals["invoice_block"]["invoice_num"]["value"]
     task_description = vals["task_block"]["task_desc"]["value"]
     # An empty box is carried as nothing at all, not as the word "N/A". Nobody
-    # has given this maker a date yet; that is not a job with no deadline.
+    # has given this assembler a date yet; that is not a job with no deadline.
     due_date, due_date_error = read_due_date(vals["date_block"]["due_date"]["value"])
     if due_date_error:
-        # Sent back to the box it belongs to, so the maker reads the message
+        # Sent back to the box it belongs to, so the assembler reads the message
         # under the date rather than losing the whole form.
         ack(response_action="errors", errors={"date_block": due_date_error})
         return
@@ -1886,21 +1889,21 @@ def step_2_view(step1_data):
     """
     Screen 2: WHAT WORK EXISTS, and nothing else.
 
-    One section per piece, each with a Field and a Border tick. That is the
+    One section per part, each with a Field and a Border tick. That is the
     whole form. It deliberately does not ask for designs, difficulty, jig or
-    cutting: the maker filling this in has just been handed the diagram and is
+    cutting: the assembler filling this in has just been handed the diagram and is
     establishing the shape of the job. The details are asked for when they
-    first enter that piece's lane, which is the moment they are looking at it.
+    first enter that part's lane, which is the moment they are looking at it.
 
     Checkboxes rather than a text box per lane, because the question is yes or
-    no and a tick answers it without the maker having to know that leaving a
+    no and a tick answers it without the assembler having to know that leaving a
     box empty is how you say "there isn't one".
 
-    Every piece needs at least one lane, and the FORM enforces it: the block is
+    Every part needs at least one lane, and the FORM enforces it: the block is
     required, so Slack refuses the submission before it is sent. A part with
-    neither lane is a piece that exists and can never be worked, and that is
+    neither lane is a part that exists and can never be worked, and that is
     checked again in the handler and once more by the database - three places,
-    because a maker who already had this form open when it changed still submits
+    because an assembler who already had this form open when it changed still submits
     the shape they were given. None of that is explained on the screen. A rule
     the form will not let you break does not need a paragraph telling you not to
     break it.
@@ -1911,14 +1914,10 @@ def step_2_view(step1_data):
         "text": {"type": "mrkdwn", "text": "*What work is on each part?*"},
     }]
     for number in range(1, count + 1):
-        # One piece per section. On a single-piece job the heading would be
-        # noise - there is nothing to tell it apart from - so it is left off.
-        if count > 1:
-            blocks.append({"type": "divider"})
-            blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*Part {number}*"},
-            })
+        # One tick pair per part, headed by the part's own name - the label IS
+        # the heading, so the form never says "Part 2" twice. On a one-part job
+        # there is nothing to tell it apart from, so it is simply "Work".
+        #
         # REQUIRED, and that is the whole of the rule. Left optional, Slack
         # printed "(optional)" after the label - the form said the opposite of
         # what the workshop means, and a sentence above it was being used to
@@ -1927,7 +1926,7 @@ def step_2_view(step1_data):
             "type": "input",
             "block_id": f"part_{number}",
             "label": {"type": "plain_text",
-                      "text": "Work" if count == 1 else f"Part {number} work"},
+                      "text": "Work" if count == 1 else f"Part {number}"},
             "element": {
                 "type": "checkboxes",
                 "action_id": "lanes",
@@ -1955,7 +1954,7 @@ def step_2_view(step1_data):
 
 
 def read_lanes(values, number):
-    """Which lanes were ticked for one piece, as a set."""
+    """Which lanes were ticked for one part, as a set."""
     block = values.get(f"part_{number}") or {}
     chosen = (block.get("lanes") or {}).get("selected_options") or []
     return {option.get("value") for option in chosen}
@@ -1963,10 +1962,10 @@ def read_lanes(values, number):
 
 def _typed(values, block_id, action_id):
     """
-    What the maker typed into one box, or None if that box was not on the form
+    What the assembler typed into one box, or None if that box was not on the form
     they submitted.
 
-    A modal a maker already had open when the form changed still submits the
+    A modal an assembler already had open when the form changed still submits the
     blocks it was built with. Reading those defensively means an older form
     lands as the job it describes - a field job with no border on it - rather
     than raising on a block that was never there.
@@ -1984,8 +1983,8 @@ def handle_step_2(ack, body, client):
     team_channel_id = prev_data["channel_id"]
     count = prev_data.get("part_count") or 1
 
-    # Every piece needs work on it. A part with neither lane is a piece that
-    # exists and can never be worked, and the error goes against the piece it
+    # Every part needs work on it. A part with neither lane is a part that
+    # exists and can never be worked, and the error goes against the part it
     # is about rather than the top of the form.
     parts = []
     for number in range(1, count + 1):
@@ -2010,7 +2009,7 @@ def handle_step_2(ack, body, client):
             parts=parts,
         )
     except database.TrackerRefused as refusal:
-        # /track checked this before the form opened, but the maker may have
+        # /track checked this before the form opened, but the assembler may have
         # resumed another job from its card while the form was up. Creating
         # would start a second timer, so LMSA said no and nothing was made.
         if refusal.reason != "another_job_running":
@@ -2022,7 +2021,7 @@ def handle_step_2(ack, body, client):
         )
         return
 
-    # Submitting this form is the handover into the workshop: the maker has the
+    # Submitting this form is the handover into the workshop: the assembler has the
     # job and is already getting it ready. So the setup timer is running by the
     # time the card appears, and there is no "Start" button - there is nothing
     # left to start. That setup is the JOB's, not the first part's.
@@ -2044,7 +2043,7 @@ def handle_step_2(ack, body, client):
     #
     # A person, then what they are doing - the room is reading about a colleague
     # picking up a job, not a row being written. Only starting and finishing:
-    # moving between a field and a border is the maker's own business and the
+    # moving between a field and a border is the assembler's own business and the
     # channel never hears about it.
     client.chat_postMessage(
         channel=team_channel_id,
@@ -2055,7 +2054,7 @@ def handle_step_2(ack, body, client):
 # ---------------------------------------------------------------------------
 # Working the job: starting, pausing, cutting, switching
 # ---------------------------------------------------------------------------
-# Exactly one piece of work accrues at a time. Pause means "not working this
+# Exactly one item of work accrues at a time. Pause means "not working this
 # job for now"; Switch work means "still on this job, on something else".
 # Neither finishes anything. Cutting is measured inside sheeting and leaves
 # the sheeting timer running.
@@ -2066,24 +2065,24 @@ def handle_step_2(ack, body, client):
 @app.action("trk_start_border_production")
 @app.action("trk_start_job_setup")
 @app.action("trk_start_packing_production")
-# The two ids cards used before every piece of work had its own. A card posted
-# under the older scheme is still sitting in a maker's DM and still clickable.
+# The two ids cards used before every item of work had its own. A card posted
+# under the older scheme is still sitting in an assembler's DM and still clickable.
 @app.action("trk_start_setup")
 @app.action("trk_start_production")
 def handle_start(ack, body, client):
     """
-    Move onto a piece of work and start timing it.
+    Move onto an item of work and start timing it.
 
     One handler behind every button that does that: Start field sheeting,
     Resume, Start Part 2 border setup and Back to Part 1 field sheeting. The
-    value carries which piece, which lane and which activity; a button posted
+    value carries which part, which lane and which activity; a button posted
     by an earlier version of the tracker carries less, and what it leaves out
     resolves to where the job's cursor is - the only thing such a card could
     have meant.
 
     FIRST ENTRY TO A LANE ASKS WHAT IT IS. A lane nobody has described yet gets
-    its form here rather than being started blind: the maker is looking at that
-    piece of the diagram at exactly this moment, which is why the question is
+    its form here rather than being started blind: the assembler is looking at that
+    part of the diagram at exactly this moment, which is why the question is
     asked now and not at intake, and not when some other lane finished.
     """
     ack()
@@ -2094,7 +2093,7 @@ def handle_start(ack, body, client):
     task = resolve_job(client, body, task_id, user_id, channel_id)
     if task is None:
         return
-    # A card can be pressed while a different job is being timed - the maker
+    # A card can be pressed while a different job is being timed - the assembler
     # found an old card in their DM. Refused before any form opens: the timer
     # they are running has to be paused first, and nothing here does that for
     # them.
@@ -2131,22 +2130,22 @@ def lane_details_view(task, part, phase, activity, channel_id):
 
     Two questions, and only two: the design and the difficulty, because a lane
     with neither cannot be read back later. Both are known from the diagram the
-    maker is holding as they answer.
+    assembler is holding as they answer.
 
     THE JIG IS NOT ASKED HERE. Finding and testing it IS the setup, so at the
-    moment this form opens the maker frequently does not know it yet, and a box
+    moment this form opens the assembler frequently does not know it yet, and a box
     they cannot fill is a question that teaches them to skip questions. It is
     recorded from the work card instead, with "Set jig / template", at the point
     it becomes known - which is where it was always genuinely established.
 
-    Saving starts the work the maker pressed for. That is the whole point of
+    Saving starts the work the assembler pressed for. That is the whole point of
     asking here: the form is on the way to the bench, not a detour from it.
     """
     # Name it for what the press starts, not for the lane's sheeting.
     #
     # This was hardcoded to "production", which was right while an untouched
     # lane could be entered straight at its sheeting. It cannot any more - the
-    # only way into a lane nobody has touched is its setup - so a maker who
+    # only way into a lane nobody has touched is its setup - so an assembler who
     # pressed "Start field setup" met a form headed "Field sheeting" and then
     # found their setup running. The form is the same two questions either way;
     # only its heading has to agree with the button that opened it.
@@ -2156,9 +2155,9 @@ def lane_details_view(task, part, phase, activity, channel_id):
     return {
         "type": "modal",
         "callback_id": "trk_lane_details",
-        # Slack allows 24 characters in a title and silently refuses the view
-        # above that, so this says the piece and lets the section below say the
-        # job.
+        # The title carries the identity - "Part 2 Border setup" - and the body
+        # goes straight to the two questions. Slack allows 24 characters in a
+        # title and silently refuses the view above that.
         "title": {"type": "plain_text", "text": named[:24]},
         "submit": {"type": "plain_text", "text": "Save and start"},
         "close": {"type": "plain_text", "text": "Cancel"},
@@ -2170,11 +2169,6 @@ def lane_details_view(task, part, phase, activity, channel_id):
             "channel_id": channel_id,
         }),
         "blocks": [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn",
-                         "text": f"*{named}*\nWhat is on this part of the diagram?"},
-            },
             {
                 "type": "input",
                 "block_id": "design_block",
@@ -2205,7 +2199,7 @@ def lane_details_view(task, part, phase, activity, channel_id):
 
 @app.view("trk_lane_details")
 def handle_lane_details(ack, body, client):
-    """Save what the lane is, then start the work the maker pressed for."""
+    """Save what the lane is, then start the work the assembler pressed for."""
     vals = body["view"]["state"]["values"]
     meta = json.loads(body["view"]["private_metadata"])
 
@@ -2229,14 +2223,14 @@ def handle_lane_details(ack, body, client):
     task = resolve_job(client, body, task_id, user_id, channel_id)
     if task is None:
         return
-    # The form may have sat open while the maker resumed another job from its
+    # The form may have sat open while the assembler resumed another job from its
     # card. Nothing is recorded for a press that cannot start.
     if busy_elsewhere(client, task, user_id, channel_id):
         return
 
     # The details are written against the lane whichever it is - the same call
-    # the border form has always made, now told which piece and which lane. No
-    # jig: it is recorded from the card, once the maker knows it.
+    # the border form has always made, now told which part and which lane. No
+    # jig: it is recorded from the card, once the assembler knows it.
     database.set_lane_details(
         task_id, meta["phase"], design, difficulty, part=meta["part"],
     )
@@ -2258,7 +2252,7 @@ def handle_lane_details(ack, body, client):
 @app.action("trk_stop_task")
 def handle_stop(ack, body, client):
     """
-    Pause. The maker is not working on this job for the moment.
+    Pause. The assembler is not working on this job for the moment.
 
     Whatever was being timed stops, including any cutting that was being
     measured inside it - there is nothing left for cutting to be inside. The
@@ -2280,14 +2274,14 @@ def handle_stop(ack, body, client):
 @app.action("trk_start_cutting")
 def handle_start_cutting(ack, body, client):
     """
-    The maker goes and cuts tiles for a while.
+    The assembler goes and cuts tiles for a while.
 
     The sheeting timer keeps running, because they are still working this job -
     they have gone downstairs to cut for it. This measures how much of that
     time was spent cutting; it never takes time away from the sheeting.
 
-    It is never told which piece. Cutting is measured INSIDE the running
-    segment, and that segment already names the piece - so the attribution
+    It is never told which part. Cutting is measured INSIDE the running
+    segment, and that segment already names the part - so the attribution
     comes from the work it is happening in rather than from the button.
     """
     ack()
@@ -2371,7 +2365,7 @@ def handle_start_packing(ack, body, client):
 # ---------------------------------------------------------------------------
 # Two different presses share one action id, told apart by what the button
 # carries. A lane's Finish names that lane and closes it, and nothing else
-# happens - no form, no channel post, no move to somewhere the maker did not
+# happens - no form, no channel post, no move to somewhere the assembler did not
 # ask to go. The job's Finish carries only the job and appears once nothing
 # anywhere on it is unfinished; that one opens the closing notes.
 
@@ -2388,7 +2382,7 @@ def handle_complete(ack, body, client):
         return
 
     if phase is None:
-        # The job itself. Offered only when every lane on every piece is done,
+        # The job itself. Offered only when every lane on every part is done,
         # and checked again here because the card may have been sitting open.
         if not job_is_finishable(task):
             client.chat_postEphemeral(
@@ -2420,7 +2414,7 @@ def handle_complete(ack, body, client):
         )
         return
 
-    # The card, and nothing else. Finishing a lane is the maker's business and
+    # The card, and nothing else. Finishing a lane is the assembler's business and
     # the channel does not hear about it; what comes next is on the card, which
     # now offers whatever is still unfinished.
     update_card(client, database.get_task(task_id), channel_id)
@@ -2444,7 +2438,7 @@ def handle_notes_submission(ack, body, client):
 
     total_time = database.format_duration(task["total_elapsed"])
 
-    # The maker's own card keeps the full record: it is their work, in their
+    # The assembler's own card keeps the full record: it is their work, in their
     # DM, and the breakdown is the thing they would want to look back at.
     client.chat_update(
         channel=dm_channel_id,
@@ -2498,10 +2492,10 @@ def handle_notes_submission(ack, body, client):
 @app.action("trk_add_jig")
 def handle_add_jig(ack, body, client):
     """
-    Record the jig on the work the maker is doing.
+    Record the jig on the work the assembler is doing.
 
     It asks nothing but the value. The button is only on the card while a lane
-    is being worked, and it carries which piece and which lane - so there is no
+    is being worked, and it carries which part and which lane - so there is no
     "which work used it?" left to ask. That question existed because the jig
     button used to sit on every card, including ones where the answer was not
     obvious; now the card only offers it where the answer is the work in hand.
@@ -2545,7 +2539,7 @@ def handle_add_jig(ack, body, client):
                 {
                     "type": "input",
                     "block_id": "jig_block",
-                    "label": {"type": "plain_text", "text": "Jig or template for " + named.lower()},
+                    "label": {"type": "plain_text", "text": "Jig or template for " + lower_name(named)},
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "jig_size",
@@ -2576,7 +2570,7 @@ def handle_add_jig_submission(ack, body, client):
     task = database.get_task(task_id)
 
     # The job can disappear between opening the modal and submitting it -
-    # deleted, or finished. Tell the maker instead of closing the modal in
+    # deleted, or finished. Tell the assembler instead of closing the modal in
     # silence with their jig unrecorded, and leave the final card alone.
     if task is None or task["current_phase"] == "completed":
         client.chat_postEphemeral(
@@ -2612,7 +2606,7 @@ def handle_delete(ack, body, client):
         )
         return
 
-    # A job is only ever taken off the list by the maker whose job it is. There
+    # A job is only ever taken off the list by the assembler whose job it is. There
     # is no supervisor path anywhere in the tracker yet, so this check is the
     # whole of the rule - it is not a friendly message in front of a second one
     # enforced further down.
@@ -2628,7 +2622,7 @@ def handle_delete(ack, body, client):
     database.delete_task(task_id)
 
     # The card is replaced by what actually happened. Nothing is destroyed -
-    # LMSA cancels the job and keeps it, which is exactly why a maker may safely
+    # LMSA cancels the job and keeps it, which is exactly why an assembler may safely
     # use this on a job that turned out to be a mistake. Saying "deleted" here
     # contradicted the dialog they had just agreed to, one press earlier.
     client.chat_update(
@@ -2686,7 +2680,7 @@ def handle_edit(ack, body, client):
         jig_blocks.append({
             "type": "input",
             "block_id": f"jig_edit_{rec['id']}",
-            "label": {"type": "plain_text", "text": f"Field jig {i} (or template)"},
+            "label": {"type": "plain_text", "text": f"Field jig / template {i}"},
             "element": {
                 "type": "plain_text_input",
                 "action_id": "jig_value",
@@ -2697,7 +2691,7 @@ def handle_edit(ack, body, client):
         jig_blocks.append({
             "type": "input",
             "block_id": f"jig_edit_{rec['id']}",
-            "label": {"type": "plain_text", "text": f"Border jig {i} (or template)"},
+            "label": {"type": "plain_text", "text": f"Border jig / template {i}"},
             "element": {
                 "type": "plain_text_input",
                 "action_id": "jig_value",
@@ -2712,14 +2706,16 @@ def handle_edit(ack, body, client):
             "type": "modal",
             "callback_id": "trk_edit_task_modal",
             "title": {"type": "plain_text", "text": "Edit job"},
-            "submit": {"type": "plain_text", "text": "Save Changes"},
+            "submit": {"type": "plain_text", "text": "Save changes"},
             "close": {"type": "plain_text", "text": "Cancel"},
             "private_metadata": edit_metadata,
+            # The same words as the intake form and the card: sentence case,
+            # and the names the workshop already uses for these things.
             "blocks": [
                 {
                     "type": "input",
                     "block_id": "customer_block",
-                    "label": {"type": "plain_text", "text": "Customer Name"},
+                    "label": {"type": "plain_text", "text": "Customer name"},
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "customer_name",
@@ -2729,7 +2725,7 @@ def handle_edit(ack, body, client):
                 {
                     "type": "input",
                     "block_id": "invoice_block",
-                    "label": {"type": "plain_text", "text": "Invoice Number"},
+                    "label": {"type": "plain_text", "text": "Invoice / Pro Forma number"},
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "invoice_num",
@@ -2750,7 +2746,7 @@ def handle_edit(ack, body, client):
                 {
                     "type": "input",
                     "block_id": "design_block",
-                    "label": {"type": "plain_text", "text": "Field Design Name"},
+                    "label": {"type": "plain_text", "text": "Field design"},
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "design",
@@ -2818,7 +2814,7 @@ def handle_edit_submission(ack, body, client):
     # Same box, same rules as the intake form. One exception, and it is about
     # history rather than about dates: a row written before this screen asked
     # for a real date may hold free text, which the form pre-fills. Judging
-    # that on submit would stop a maker fixing a customer's name until they had
+    # that on submit would stop an assembler fixing a customer's name until they had
     # also rewritten a due date they never touched. So a value that comes back
     # exactly as it was stored passes through untouched - that is not new
     # typing, and nothing about it is being changed.
@@ -2833,7 +2829,7 @@ def handle_edit_submission(ack, body, client):
             return
     ack()
 
-    # What each jig said before the modal opened, so only boxes the maker
+    # What each jig said before the modal opened, so only boxes the assembler
     # actually changed get corrected
     previous_jigs = {}
     if task_before is not None:
@@ -2851,7 +2847,7 @@ def handle_edit_submission(ack, body, client):
         due_date=due_date
     )
 
-    # Fix any jig boxes the maker changed. Each correction names its own
+    # Fix any jig boxes the assembler changed. Each correction names its own
     # record, so fixing one jig never touches the others.
     for block_id, entry in vals.items():
         if not block_id.startswith("jig_edit_"):
@@ -2863,7 +2859,7 @@ def handle_edit_submission(ack, body, client):
 
     # Refresh the card so the corrections show. The job's own state decides
     # what it says and which buttons it keeps - an edit is not a change of
-    # what the maker is doing.
+    # what the assembler is doing.
     task = database.get_task(task_id)
     if task is not None and task["current_phase"] != "completed":
         update_card(client, task, channel_id, note="*Details updated.*")

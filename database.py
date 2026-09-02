@@ -347,7 +347,7 @@ def _due_date_to_iso(text):
 
 def _current_phase(job):
     """
-    The phase the maker is on, exactly as LMSA stores it.
+    The phase the assembler is on, exactly as LMSA stores it.
 
     Read, never derived. Deriving it as "the first phase that is not finished"
     looks equivalent and is not: completing a phase would advance it, and
@@ -375,12 +375,12 @@ def _legacy_status(job, phases, open_segment=None):
     the completed-job export were written against.
 
     NOT what the card reads. The card reads working_on, straight from the
-    ledger, because one word cannot say which piece of which lane is accruing.
+    ledger, because one word cannot say which part of which lane is accruing.
     This survives for the records already written in its vocabulary.
     """
     if job.get("status") == "completed":
         return "completed"
-    # Anything being timed means the maker is working, including the job's own
+    # Anything being timed means the assembler is working, including the job's own
     # opening setup - which has no lane row for the branch below to find.
     if open_segment:
         return "in_progress"
@@ -402,7 +402,7 @@ def _legacy_status(job, phases, open_segment=None):
     if state == "paused":
         return "paused"
     if state == "complete":
-        # The phase under the cursor is finished but the job is not: the maker
+        # The phase under the cursor is finished but the job is not: the assembler
         # has pressed Complete and owes the modal that follows. The upstream
         # tracker says "completed" here, and app.py picks the card's buttons
         # from it — answering "created" would rebuild the card without a
@@ -422,9 +422,9 @@ def _phase_of(phases, name, field, part_id=None):
     """
     One lane's value.
 
-    `part_id` says WHICH piece's lane. Passing None means the job's own lane -
-    packing - which is the only one that belongs to no piece. A job drawn as
-    three pieces has three borders, so asking for "the border" without saying
+    `part_id` says WHICH part's lane. Passing None means the job's own lane -
+    packing - which is the only one that belongs to no part. A job drawn as
+    three parts has three borders, so asking for "the border" without saying
     which would return whichever row came back first.
     """
     row = next(
@@ -471,7 +471,7 @@ def _jig_display(records):
 
 
 def _part_timing(timing, part_number):
-    """One piece's own figures out of the job's timing, or empty if it has none."""
+    """One part's own figures out of the job's timing, or empty if it has none."""
     for part in (timing or {}).get("perPart") or []:
         if part.get("partNumber") == part_number:
             return part
@@ -494,7 +494,7 @@ def _cutting_seconds(timing, phase=None, part_number=None):
     """
     Cutting time, either for one lane or for the whole job.
 
-    ALREADY INSIDE the lane time above, never added to it. A maker sheeting a
+    ALREADY INSIDE the lane time above, never added to it. An assembler sheeting a
     field who spends twelve minutes cutting worked the field for the whole
     hour; the twelve minutes say how part of that hour was spent.
     """
@@ -506,11 +506,11 @@ def _cutting_seconds(timing, phase=None, part_number=None):
 
 def _lane(view, timing, part, phase):
     """
-    One lane on one piece, as a small dict app.py reads.
+    One lane on one part, as a small dict app.py reads.
 
     Everything about a Field or a Border is in here, and nothing about it is
     anywhere else. That is the whole correction: the old row had one
-    `border_design`, so a job drawn as three pieces had two borders it could
+    `border_design`, so a job drawn as three parts had two borders it could
     not describe.
     """
     phases = view.get("phases") or []
@@ -552,7 +552,7 @@ def _row(view, timing):
     open_contained = view.get("openContained") or None
     last_segment = view.get("lastSegment") or None
 
-    # THE PIECES, in the order the maker reads the diagram. Each carries its
+    # THE PIECES, in the order the assembler reads the diagram. Each carries its
     # own field and border, whole. Every question about a lane is asked of one
     # of these, which is what makes "which one?" impossible to leave out.
     part_rows = [
@@ -564,12 +564,12 @@ def _row(view, timing):
         for part in parts
     ]
 
-    # ONE-PIECE COMPATIBILITY. A job drawn as a single piece is what every job
-    # was before pieces could be named, and its Part 1 IS that job - so the
+    # ONE-PIECE COMPATIBILITY. A job drawn as a single part is what every job
+    # was before parts could be named, and its Part 1 IS that job - so the
     # flat keys below are exactly true for it. They are read by the completed-
     # job export and the history it has already written, which must keep
     # working. New code asks `parts` and never these: on a job with three
-    # pieces they describe the first one and say nothing about the others,
+    # parts they describe the first one and say nothing about the others,
     # which is precisely the ambiguity the parts model exists to remove.
     first = part_rows[0] if part_rows else None
     field = (first or {}).get("field") or {}
@@ -591,7 +591,7 @@ def _row(view, timing):
         # that was the only place to put it - which made a border-only job's
         # preparation look like field work.
         "job_setup_elapsed": int((timing or {}).get("jobSetupSeconds") or 0),
-        # Single-piece compatibility, as above.
+        # Single-part compatibility, as above.
         "field_design": field.get("design"),
         "difficulty": field.get("difficulty"),
         "field_elapsed": field.get("elapsed") or 0,
@@ -610,8 +610,8 @@ def _row(view, timing):
         "border_production_elapsed": border.get("production_elapsed") or 0,
         "field_cutting_elapsed": field.get("cutting_elapsed") or 0,
         "border_cutting_elapsed": border.get("cutting_elapsed") or 0,
-        # Packing is the job's: the maker packs the finished job, not each
-        # piece separately, so it stays flat and is not inside `parts`.
+        # Packing is the job's: the assembler packs the finished job, not each
+        # part separately, so it stays flat and is not inside `parts`.
         "packing_begun": _packing_begun(phases, packing),
         "packing_state": _phase_of(phases, "packing", "state"),
         "packing_running": _phase_of(phases, "packing", "state") == "running",
@@ -619,7 +619,7 @@ def _row(view, timing):
         "packing_elapsed": packing,
         "cutting_elapsed": _cutting_seconds(timing),
         # WHAT THE MAKER IS DOING RIGHT NOW, read from the ledger rather than
-        # worked out from lane states. It names the piece as well as the lane,
+        # worked out from lane states. It names the part as well as the lane,
         # because "sheeting the border" stopped identifying the work the moment
         # a job could have three of them. `part` is None for the two job-level
         # phases: the opening setup and packing.
@@ -633,7 +633,7 @@ def _row(view, timing):
             else None
         ),
         # Work being measured INSIDE that, with the main timer still running.
-        # Its piece comes from the segment it is inside, never from the caller.
+        # Its part comes from the segment it is inside, never from the caller.
         "cutting_now": (
             {
                 "parent_phase": open_contained["parentPhase"],
@@ -667,7 +667,7 @@ def _row(view, timing):
 
 
 def _current_part(job, parts):
-    """The piece the cursor is on, as a number. None once the job is done."""
+    """The part the cursor is on, as a number. None once the job is done."""
     part_id = job.get("currentPartId")
     if not part_id:
         return None
@@ -679,9 +679,9 @@ def _current_part(job, parts):
 
 def _lane_by_number(row, part_number, which):
     """
-    One lane out of a row, by the piece's number.
+    One lane out of a row, by the part's number.
 
-    `which` is "field" or "border". Returns an empty dict when the piece or the
+    `which` is "field" or "border". Returns an empty dict when the part or the
     lane is not there, so a caller reading a job that changed underneath gets
     an absent lane rather than an exception.
     """
@@ -697,7 +697,7 @@ def _view_by_number(task_id):
 
     app.py puts this number in every button value and reads it back with
     int(...), so it stays the tracker's identity; LMSA's own uuid never appears
-    in anything a maker sees. Resolved through the API on every call rather
+    in anything an assembler sees. Resolved through the API on every call rather
     than remembered, so a restart changes nothing.
     """
     try:
@@ -743,20 +743,20 @@ def create_task(user_id, channel_id, customer_name, invoice_number, task_descrip
     Create a job and return its number — the T-number shown on the card.
 
     Creating it also starts THE JOB'S setup timer, in the same moment.
-    Submitting the intake form is the maker taking the job on, and the setup —
+    Submitting the intake form is the assembler taking the job on, and the setup —
     reading the drawings, checking what was supplied, fetching the material —
     is the first real work. There is nothing left for a "Start" button to
     start. That setup is the JOB's: it is not charged to a lane, and on a job
-    drawn as several pieces it is not charged to the first one.
+    drawn as several parts it is not charged to the first one.
 
-    `parts` is the shape of the diagram: one entry per piece, each saying
+    `parts` is the shape of the diagram: one entry per part, each saying
     whether it has a field, a border, or both. That is ALL the intake form
     establishes — no designs, no difficulty, no jig, no cutting. Those are
-    asked for when the maker first enters that piece's lane, which is the
+    asked for when the assembler first enters that part's lane, which is the
     moment they are looking at it.
 
-    Omitting `parts` describes a single-piece job through the flat arguments,
-    which is what every caller did before pieces could be named. It builds one
+    Omitting `parts` describes a single-part job through the flat arguments,
+    which is what every caller did before parts could be named. It builds one
     real part like any other.
     """
     payload = {
@@ -800,9 +800,9 @@ def create_task(user_id, channel_id, customer_name, invoice_number, task_descrip
 
 def get_active_task(user_id):
     """
-    The job this maker is TIMING right now, if any.
+    The job this assembler is TIMING right now, if any.
 
-    Not "the job they have open": a maker may hold several unfinished jobs,
+    Not "the job they have open": an assembler may hold several unfinished jobs,
     paused, and each keeps its own card. Only one may be accruing time, and
     this is that one. It is what /track asks before opening the intake form,
     and what a refusal names when a press on one job is turned down because
@@ -819,7 +819,7 @@ def get_active_task(user_id):
 
 def get_open_tasks(user_id):
     """
-    Every unfinished job this maker holds, newest first — timing or paused.
+    Every unfinished job this assembler holds, newest first — timing or paused.
 
     A paused job is still theirs: it stays here with everything it recorded
     until it is finished or cancelled, and its card in their DM is the way
@@ -834,7 +834,7 @@ def get_task(task_id):
     One job by its number, or None.
 
     A cancelled job reads as None: the tracker's Delete removed the row, and
-    app.py already tells the maker the task "may have been deleted". LMSA
+    app.py already tells the assembler the task "may have been deleted". LMSA
     retains it instead of destroying the history, but it is gone from the
     workflow either way.
     """
@@ -849,24 +849,24 @@ def get_task(task_id):
 
 def start_work(task_id, phase=None, activity="production", part=None):
     """
-    Move the maker onto a piece of work and start timing it.
+    Move the assembler onto an item of work and start timing it.
 
     One call covers every way that happens: starting the sheeting after the
     setup, resuming after a pause, going to pack for a while, and coming back
     to the sheeting afterwards. Sent with "interrupting", which tells LMSA to
     close whatever is running in the same moment this opens — so there is never
-    an instant with two timers, or none the maker did not ask for.
+    an instant with two timers, or none the assembler did not ask for.
 
     It never finishes anything. The work being left is paused, with everything
     it has recorded intact.
 
-    `phase` defaults to the lane the job is on, and `part` to the piece the
-    cursor is on, which together are what Resume wants. A lane needs a piece;
+    `phase` defaults to the lane the job is on, and `part` to the part the
+    cursor is on, which together are what Resume wants. A lane needs a part;
     the two job-level phases - the opening setup and packing - take none.
 
     Returns "started", or the reason it could not, so the handler can say so.
     A second click, or the same click delivered twice, reports "started": the
-    timer is running, which is what the maker asked for.
+    timer is running, which is what the assembler asked for.
     """
     resolved = _row_for(task_id)
     if resolved is None:
@@ -875,7 +875,7 @@ def start_work(task_id, phase=None, activity="production", part=None):
     target = phase or row["current_phase"]
     if target == "completed":
         return "job_not_open"
-    # A lane always belongs to a piece. Defaulting to the cursor's piece is
+    # A lane always belongs to a part. Defaulting to the cursor's part is
     # what makes Resume mean "carry on where I was" rather than "carry on
     # somewhere on this job".
     if target in ("field_sheeting", "border_sheeting"):
@@ -911,7 +911,7 @@ def start_packing(task_id):
 
 def stop_work(task_id):
     """
-    Pause whatever the maker is doing.
+    Pause whatever the assembler is doing.
 
     LMSA is not told which phase: the card's Pause means "stop what I am doing",
     and only the ledger knows what that is — during a packing interruption the
@@ -946,7 +946,7 @@ def start_cutting(task_id):
     """
     Start measuring cutting, WITHOUT stopping the sheeting.
 
-    The maker goes downstairs, cuts tiles, comes back. They were working the
+    The assembler goes downstairs, cuts tiles, comes back. They were working the
     field the whole time, so the field timer keeps running and this records how
     part of that time was spent. LMSA refuses it when there is no sheeting
     running to be inside.
@@ -972,7 +972,7 @@ def start_cutting(task_id):
 def stop_cutting(task_id):
     """
     Stop measuring the cutting. The sheeting timer carries on, because the
-    maker never stopped sheeting — they went and cut some tiles for a while.
+    assembler never stopped sheeting — they went and cut some tiles for a while.
 
     Returns "stopped" or the reason it could not.
     """
@@ -995,11 +995,11 @@ def complete_task(task_id, phase=None, part=None):
     """
     Finish one lane, closing any timer still running on it.
 
-    Returns "completed", or the reason it could not. The one refusal a maker
+    Returns "completed", or the reason it could not. The one refusal an assembler
     can genuinely cause is "another_phase_running" — pressing Complete Phase
     on a sheeting card while the packing timer is going. Completing the phase
     underneath a running timer would leave that timer stranded, so LMSA says
-    no and the handler tells the maker to deal with the packing first.
+    no and the handler tells the assembler to deal with the packing first.
     """
     resolved = _row_for(task_id)
     if resolved is None:
@@ -1048,22 +1048,22 @@ def _advance_cursor(job_id, phase, actor, operation, part=None):
 
 def set_lane_details(task_id, phase, design, difficulty, jig=None, part=None):
     """
-    Record what one lane on one piece IS - its design, its difficulty, and the
-    jig when the maker already knows it.
+    Record what one lane on one part IS - its design, its difficulty, and the
+    jig when the assembler already knows it.
 
-    Asked on first entry to that lane, which is the moment the maker is looking
-    at that piece of the diagram. It used to be asked of the border only, in a
+    Asked on first entry to that lane, which is the moment the assembler is looking
+    at that part of the diagram. It used to be asked of the border only, in a
     form reached by finishing the field; every lane is described the same way
-    now, and the piece is named because a job drawn as three pieces has three
+    now, and the part is named because a job drawn as three parts has three
     borders and they are not the same border.
 
     Records the details and NOTHING else. It does not start the work and does
-    not move the job's cursor: the caller starts what the maker pressed for,
+    not move the job's cursor: the caller starts what the assembler pressed for,
     which is a separate fact with its own audit.
 
     A lane previously recorded as absent is put back first, as its own audited
     step - describing work that is on the record as not happening would be
-    refused anyway, silently, and the maker would be left believing the form
+    refused anyway, silently, and the assembler would be left believing the form
     saved.
     """
     resolved = _row_for(task_id)
@@ -1104,15 +1104,15 @@ def move_to_packing_phase(task_id):
     """
     Move the cursor onto packing.
 
-    The packing modal collects nothing, so where the maker now is IS the whole
+    The packing modal collects nothing, so where the assembler now is IS the whole
     of what this submission records.
 
-    Returns "moved", or the reason it did not. A maker with Slack open twice can
+    Returns "moved", or the reason it did not. An assembler with Slack open twice can
     take a "no border" back on one surface while this form is still sitting open
     on the other, and a form opened before that correction must not carry the
     job past a border nobody has decided about. LMSA refuses that; handing the
     reason back is what lets the handler say so, instead of the refusal
-    disappearing into an unhandled error the maker never sees.
+    disappearing into an unhandled error the assembler never sees.
     """
     resolved = _row_for(task_id)
     if resolved is None:
@@ -1135,13 +1135,13 @@ def skip_border_phase(task_id, part=None):
     NOT advance the cursor. The cursor moves when the packing modal that
     follows is submitted, exactly as it would have after the border modal. The
     two answers to the same question therefore have the same shape, and while
-    the maker has not moved on the decision costs nothing to take back.
+    the assembler has not moved on the decision costs nothing to take back.
 
     phase_already_skipped is tolerated for the same reason already_processed
-    is: a redelivered click must not show an error to a maker who did nothing
+    is: a redelivered click must not show an error to an assembler who did nothing
     wrong. Nothing else is swallowed. A refusal that means the skip did not
     happen has to reach the handler, because the handler is what tells the
-    maker.
+    assembler.
     """
     resolved = _row_for(task_id)
     if resolved is None:
@@ -1185,7 +1185,7 @@ def revert_border_skip(task_id, part=None):
     This one hands its refusal back instead of swallowing it. A correction that
     quietly did nothing is worse than an error: the handler would rebuild a
     card claiming the border is back while the record still says skipped, and
-    the maker would carry on believing it. The handler turns the reason into
+    the assembler would carry on believing it. The handler turns the reason into
     something readable.
 
     Returns "reverted", or the refusal reason, or None when the job could not
@@ -1264,7 +1264,7 @@ def delete_task(task_id):
     Remove the job from the workflow.
 
     LMSA cancels rather than deletes, so the timings and the history of a job
-    somebody spent the morning on survive. To the maker it is gone: the card is
+    somebody spent the morning on survive. To the assembler it is gone: the card is
     replaced and the job stops blocking a new one.
     """
     resolved = _row_for(task_id)
@@ -1339,9 +1339,9 @@ def update_task(task_id, customer, invoice, task_desc, design, difficulty, due_d
             "customerName": customer,
             "invoiceNumber": invoice,
             "taskDescription": task_desc,
-            # The field design belongs to one piece's lane, so Edit says
+            # The field design belongs to one part's lane, so Edit says
             # which. Part 1 by default, which for a job drawn as a single
-            # piece is the only answer there is.
+            # part is the only answer there is.
             "partNumber": part if part is not None else 1,
             "designName": design,
             "difficulty": difficulty,
@@ -1349,7 +1349,7 @@ def update_task(task_id, customer, invoice, task_desc, design, difficulty, due_d
             # No Set Date tick box, so there is nothing to send. Omitting the
             # key tells LMSA to keep whatever the row already carries; sending
             # it as null would clear it, silently erasing a historical choice
-            # the maker never touched.
+            # the assembler never touched.
             "dueDateText": due_date,
             "dueDate": _due_date_to_iso(due_date),
             "actor": f"slack:{row['user_id']}",
@@ -1410,8 +1410,8 @@ def get_completed_tasks():
     for entry in (data or {}).get("jobs", []):
         rows.append(_row({
             "job": entry["job"],
-            # The pieces come through too, so the export reads a multi-piece
-            # job as the several pieces it was rather than as its first one.
+            # The parts come through too, so the export reads a multi-part
+            # job as the several parts it was rather than as its first one.
             "parts": entry.get("parts") or [],
             "phases": entry.get("phases") or [],
             "jigs": entry.get("jigs") or [],
