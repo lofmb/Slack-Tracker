@@ -59,10 +59,10 @@ regression: the workflow cursor was answering one phase too far ahead.
 | Script | What it proves |
 | --- | --- |
 | `workshop_flow_proof.py` | The whole journey: intake, setup, sheeting, cutting inside it, switching between work, a finished job. Also checks every payload against Slack's own structural rules. |
-| `jig_proof.py` | Jigs append rather than overwrite; a correction changes the value it names; a late jig lands on the phase the maker chose; both phases stay visible. |
+| `jig_proof.py` | Jigs append rather than overwrite; a correction changes the value it names; a late jig lands on the phase the assembler chose; both phases stay visible. |
 | `no_border_proof.py` | A skipped border records that nothing happened, carries no completion time, and can never read as a border worked for zero seconds; the way back stays open until packing finishes. |
-| `packing_interruption_proof.py` | Packing can cut in on field or border work, the job remembers where it was, and the maker can go back to the sheeting. |
-| `local_ingress_proof.py` | The full Slack path end to end, including that a refusal travels back to the maker rather than disappearing. |
+| `packing_interruption_proof.py` | Packing can cut in on field or border work, the job remembers where it was, and the assembler can go back to the sheeting. |
+| `local_ingress_proof.py` | The full Slack path end to end, including that a refusal travels back to the assembler rather than disappearing. |
 | `idempotency_proof.py` | A redelivered click does not write twice — across Bolt's real worker-thread boundary, which is where an earlier version of this check was wrong. |
 | `integrated_run.py` | The vendored Python against a real LMSA and a real database, including that the adapter returns values word for word as they were stored. |
 | `interface_check.py` | Every call `app.py` makes fits the adapter it is calling, and the due-date rules behave as the label promises. |
@@ -101,9 +101,9 @@ are now measured automatically — but the finding came from a person reading th
 cards, not from a test.
 
 **Not proven, because it is not decided.** Nothing protects a timer left running
-overnight. There is no scheduler in the tracker at all: every timer moves when a
-maker presses something. Your instinct to stop the clock at 18:00 was right about
-the problem; the current thinking is to *ask* the worker rather than cut the
+overnight. There is no scheduler in the tracker at all: every timer moves when an
+assembler presses something. Your instinct to stop the clock at 18:00 was right about
+the problem; the current thinking is to *ask* the assembler rather than cut the
 clock silently, because a hard stop deletes late work that really happened. It is
 not designed yet.
 

@@ -552,7 +552,7 @@ def _row(view, timing):
     open_contained = view.get("openContained") or None
     last_segment = view.get("lastSegment") or None
 
-    # THE PIECES, in the order the assembler reads the diagram. Each carries its
+    # THE PARTS, in the order the assembler reads the diagram. Each carries its
     # own field and border, whole. Every question about a lane is asked of one
     # of these, which is what makes "which one?" impossible to leave out.
     part_rows = [
@@ -564,7 +564,7 @@ def _row(view, timing):
         for part in parts
     ]
 
-    # ONE-PIECE COMPATIBILITY. A job drawn as a single part is what every job
+    # ONE-PART COMPATIBILITY. A job drawn as a single part is what every job
     # was before parts could be named, and its Part 1 IS that job - so the
     # flat keys below are exactly true for it. They are read by the completed-
     # job export and the history it has already written, which must keep
@@ -618,7 +618,7 @@ def _row(view, timing):
         "packing_finished": _phase_of(phases, "packing", "state") == "complete",
         "packing_elapsed": packing,
         "cutting_elapsed": _cutting_seconds(timing),
-        # WHAT THE MAKER IS DOING RIGHT NOW, read from the ledger rather than
+        # WHAT THE ASSEMBLER IS DOING RIGHT NOW, read from the ledger rather than
         # worked out from lane states. It names the part as well as the lane,
         # because "sheeting the border" stopped identifying the work the moment
         # a job could have three of them. `part` is None for the two job-level

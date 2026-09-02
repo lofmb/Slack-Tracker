@@ -36,7 +36,7 @@ returns the real `D…` conversation id, which is then stored so the card can be
 updated later.
 
 **The export finds the existing DM instead of opening one** (`aa18778`). Same
-reason. `users_conversations` needs only `im:read`. If no DM exists yet the maker
+reason. `users_conversations` needs only `im:read`. If no DM exists yet the assembler
 is told to start a job first, because the upload will not accept a raw user id.
 
 **The database functions save through LMSA instead of the local SQLite file**
@@ -56,7 +56,7 @@ alongside it only when the text happens to be one.
 Slack features on one app, so it needs to tell which clicks belong to the tracker
 and pass only those through. The prefix is how it tells.
 
-**The phase the maker is on is read from LMSA rather than worked out** (`845d8de`).
+**The phase the assembler is on is read from LMSA rather than worked out** (`845d8de`).
 This one is worth reading properly, because it was a real bug. LMSA had started
 working the current phase out from which phases were finished. That sounds the
 same as storing it, and it is not: completing a phase made it move, and
@@ -65,7 +65,7 @@ every branch landed a step early — pressing Complete on Field opened the Packi
 form instead of the Border form, the border design and difficulty were never
 collected, and once all three phases were finished nothing matched at all, so
 Complete quietly did nothing and the job could not be finished. LMSA now stores
-the phase the maker is on, exactly as the original tracker does, and only a
+the phase the assembler is on, exactly as the original tracker does, and only a
 submitted form moves it. That is also what makes cancelling a form and pressing
 Complete again bring the same form back.
 
@@ -73,7 +73,7 @@ There is one more thing worth knowing about, which is not visible in the workflo
 Every request now runs inside a small wrapper (`slack_request` in `database.py`)
 that notes which Slack delivery is being handled, so that if Slack sends the same
 click twice it is recognised as the same action rather than applied twice. It
-changes nothing a maker can see.
+changes nothing an assembler can see.
 
 The deeper LMSA-side detail — the database schema, the internal API, the audit
 trail and the deployment — is documented on the LMSA side, in
@@ -87,7 +87,7 @@ Three behaviours differ from the original, deliberately, and should not be
 
 - **Delete keeps the row.** The original deletes the task and its time segments
   outright. LMSA marks the job cancelled instead, so a morning's timings are not
-  destroyed. To the maker it behaves the same: the card goes, and the job stops
+  destroyed. To the assembler it behaves the same: the card goes, and the job stops
   blocking a new one.
 - **Finishing a phase no longer marks the whole job completed.** The original sets
   the job's status to `completed` every time a phase finishes, which quietly drops
@@ -120,7 +120,7 @@ order, which means nothing to anyone reading this code later. The word
 "phase" stays, of course, where it means a real workflow phase — Field,
 Border and Packing genuinely are phases in this tracker. Python comments
 describe what the workshop workflow is doing, why a state transition exists,
-what a maker can do, and what safety condition is being protected. Exact Git
+what an assembler can do, and what safety condition is being protected. Exact Git
 commit ids are used only where something technical genuinely needs them (the
 vendor pin on the LMSA side, deployment records), never as a feature's name.
 
@@ -131,13 +131,13 @@ commits, and never impersonate the original author.
 
 # Post-baseline feature history
 
-For each feature, record: the feature name, the date, what changed from a maker's
+For each feature, record: the feature name, the date, what changed from an assembler's
 point of view, whether it was agreed with Luis beforehand, anything it needs on
 the LMSA side, and the commit or commits it arrived in.
 
 ## Delivery identity on Bolt's worker threads (2026-08-26)
 
-Integration hardening, not a new feature — nothing a maker sees changed.
+Integration hardening, not a new feature — nothing an assembler sees changed.
 
 The middleware that notes which Slack delivery is being handled runs on the
 thread that receives the request, but Bolt runs the handler itself on a worker
@@ -156,7 +156,7 @@ merged into `feature/lmsa-integration`.
 
 ## Jig Size for Field and Border (2026-08-26)
 
-The first agreed post-baseline feature. What changed for a maker:
+The first agreed post-baseline feature. What changed for an assembler:
 
 - The Field details form and the Border details form each gained an optional
   "Jig Size (mm)" box. Usually a millimetre size like 49.6, but the box takes
@@ -166,7 +166,7 @@ The first agreed post-baseline feature. What changed for a maker:
   for the times a phase genuinely uses another jig - one swapped mid-run
   after a problem, or two needed together. From the Border card onwards the
   box asks which phase used it (Border is pre-picked on the Border card;
-  from Packing the maker chooses), so Field work that genuinely continued
+  from Packing the assembler chooses), so Field work that genuinely continued
   AFTER Field was completed still gets its jig recorded properly. Add Jig
   ADDS a record next to the existing one; the jig that was already used
   stays on the card, oldest first ("49.6 / 50").
@@ -193,12 +193,12 @@ past the border was to complete the border phase, which recorded a phase that
 was worked for zero seconds - indistinguishable, on every card and in the
 export, from a border that really was worked and happened to be quick.
 
-What changed for a maker:
+What changed for an assembler:
 
 - The Border details form gained a **No Border** button next to the design and
   difficulty boxes. It is offered at that moment and nowhere else: the job
   paper does not always say whether there is a border, but by the time field
-  sheeting is finished the maker knows. Intake is deliberately left alone.
+  sheeting is finished the assembler knows. Intake is deliberately left alone.
 - Choosing it turns the same form into the Packing one, so the job carries
   straight on. The team channel gets a line saying the job has no border, the
   same way it gets one when a phase finishes.
@@ -229,7 +229,7 @@ back does not erase the original choice.
 Agreed with Luis beforehand: yes - "some jobs genuinely have no Border, add an
 explicit No Border path, do not generalise it into skipping any phase" was
 confirmed in the creator review. It is Border-only for exactly that reason.
-Tom settled the two questions the review left open: where the maker is asked,
+Tom settled the two questions the review left open: where the assembler is asked,
 and how a mistake is corrected.
 
 LMSA side: the border phase row is marked `skipped` rather than completed, so
@@ -241,13 +241,13 @@ given a jig. Arrived in the single feature commit on `feature/no-border`.
 
 ## Packing interruption (2026-08-26)
 
-Packing no longer has to wait for the sheeting to be finished. A maker doing
+Packing no longer has to wait for the sheeting to be finished. An assembler doing
 field or border work can break off, pack for a while, and come back - which is
 how the workshop actually runs - and the times stay separate and truthful:
 sheeting time stays sheeting time, packing time is packing time, and nothing
 is ever added up into the wrong pot because work moved around.
 
-What changed for a maker:
+What changed for an assembler:
 
 - The Field and Border cards - working or paused - gained a **Start Packing**
   button. One press: the sheeting timer stops, the packing timer starts.
@@ -279,7 +279,7 @@ button is gone and the refusal explains why.
 Agreed with Luis beforehand: yes - "packing is manually started and may
 interrupt sheeting" and "nothing ever auto-starts a timer" are both from the
 creator review, and this is built to exactly those words. The one automatic
-thing is conservative: switching to packing closes the timer the maker is
+thing is conservative: switching to packing closes the timer the assembler is
 walking away from, never opens one they did not ask for.
 
 LMSA side: no schema change - the timing ledger and the phase lanes were
@@ -293,12 +293,12 @@ a live timer or finished packing. Arrived in the single feature commit on
 
 ## Setup, cutting, and the card rebuilt (2026-08-27)
 
-The largest change to what a maker sees since the baseline. Three things, and
+The largest change to what an assembler sees since the baseline. Three things, and
 they belong together because they are all answers to the same complaint: the
-card told the maker about the database rather than about the job.
+card told the assembler about the database rather than about the job.
 
 **The job starts when it is handed over.** The details form no longer asks for
-a jig size — a maker filling it in has just been given the job and normally
+a jig size — an assembler filling it in has just been given the job and normally
 does not know the jig yet, and calling the box "optional" did not make asking
 any less premature. Submitting the form is the handover into the workshop, so
 the setup clock is running by the time the card appears and there is no
@@ -313,7 +313,7 @@ and opens the sheeting. It sits underneath the Field and Border work rather
 than beside it, so the job still runs Field → Border → Packing and a lane's
 time is its setup plus its sheeting, reported as two lines that add up.
 
-**Cutting is measured inside the sheeting, never beside it.** A maker sheeting
+**Cutting is measured inside the sheeting, never beside it.** An assembler sheeting
 a field goes downstairs and cuts tiles for twelve minutes; they never stopped
 working the field, so the field timer keeps running and "Start cutting" simply
 records how part of that hour was spent. Sixty minutes of field work
@@ -331,7 +331,7 @@ are not on the list. Packing interrupting the sheeting still works exactly as
 it did; it is now one of several moves rather than a special case.
 
 **And one card, built from what the job is.** It leads with the job, then what
-the maker is working on, then the time recorded, then what they can do next,
+the assembler is working on, then the time recorded, then what they can do next,
 with the rest of the job's details grouped underneath rather than given the
 same weight. Finishing a lane is one press that names the lane and asks first;
 once a lane is finished the same place says what is owed next ("Enter border
@@ -340,16 +340,16 @@ details"). Refusals say what the job is doing and what to press instead.
 Agreed with Luis beforehand: no. This is workshop-originated, from watching
 the tracker in real use — the jig question came too early, "Start" was on a
 job already begun, and the cards read as a data dump. It changes no rule from
-the creator review: nothing auto-starts a timer except the handover the maker
+the creator review: nothing auto-starts a timer except the handover the assembler
 themselves submits, one person still times one thing at a time, and packing
-still only ever moves the job on when the maker says so.
+still only ever moves the job on when the assembler says so.
 
 LMSA side: a `job_segments.activity` column (setup or production), a separate
 `job_contained_segments` ledger for cutting so no total can pick it up twice,
 and "one open segment per person" as a database rule rather than only a
 handler check. Arrived in the single feature commit on `feature/workshop-flow`.
 
-## Reading the flow as a maker reads it (2026-08-27)
+## Reading the flow as an assembler reads it (2026-08-27)
 
 Every card, form, confirmation and refusal the workflow can produce was read the
 way someone on the workshop floor reads it, against one standard: which job is
@@ -360,24 +360,24 @@ at all.
 **The border details form never opened.** Its submit button read "Save and go to
 the border" — twenty-five characters, and Slack caps a view's submit at
 twenty-four. Slack does not shorten an over-long label; it refuses the whole
-form. So a maker who finished the field sheeting pressed the button and got
+form. So an assembler who finished the field sheeting pressed the button and got
 silence, on the one form no job with a border can route around. It now reads
 "Save the border details", which is also truer: submitting saves the details, and
-the maker starts the border when they are ready.
+the assembler starts the border when they are ready.
 
 **A lane announced itself finished twice.** The button that finishes a lane is
-the same button that reopens a form the maker cancelled, so pressing it again to
+the same button that reopens a form the assembler cancelled, so pressing it again to
 get back into the border form told the team the field had just finished for a
 second time. It now announces only the first time, when the lane genuinely
 changes state.
 
-**And the wording.** The intake form was titled after work the maker was not
+**And the wording.** The intake form was titled after work the assembler was not
 about to do; the packing confirmation advised a button that is never on a packing
 card; editing a jig asked for millimetres when `template` is a legitimate value;
 two refusals said only what was *not* happening, which is no use to someone whose
 card went stale in another window; the setup card never mentioned that pausing
 finishes nothing, on the one card where a forgotten timer costs an evening. Each
-now says what is actually true of the job in front of the maker.
+now says what is actually true of the job in front of the assembler.
 
 Agreed with Luis beforehand: no. This is workshop-originated, from reading the
 real surface rather than the transitions. It changes no rule from the creator
@@ -404,12 +404,12 @@ stores nothing rather than minting a new sentinel. Anything else — "Friday",
 "when the paint arrives", or an impossible date like `31/02/26` — is refused at
 the form, in words, before the job is created. That last part matters more than
 it looks: the date was only ever checked against a pattern, so `31/02/26` would
-have passed the form and failed in the database, where the maker sees nothing
+have passed the form and failed in the database, where the assembler sees nothing
 useful at all.
 
 The Edit form asks the same question the same way, with one exception: a value
 that comes back exactly as it was stored passes through untouched. Historical
-rows hold free text, and a maker correcting a customer's name should not be
+rows hold free text, and an assembler correcting a customer's name should not be
 blocked until they also rewrite a date they never touched.
 
 Historical `N/A` rows are left alone. They read as "Not set" wherever a person
@@ -428,7 +428,7 @@ parity check honest.
 
 Recorded here so it is not mistaken for hygiene debt. In `handle_export`, the
 "Export ready! Check your DMs" message sits *after* an unconditional `raise`
-inside the `except` block, so Python can never reach it. A maker who exports
+inside the `except` block, so Python can never reach it. An assembler who exports
 successfully gets silence and may well run it again.
 
 It is not ours: the same shape is in the original at `app.py:262-270`, so it has
