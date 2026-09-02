@@ -360,6 +360,16 @@ def switch_destinations(task):
     return out
 
 
+def _lanes_named(values):
+    """The (part, phase) lanes a set of button values names, whatever their activity."""
+    lanes = set()
+    for raw in values or ():
+        _task, part, phase, _activity = read_work_value(raw)
+        if phase:
+            lanes.add((part, phase))
+    return lanes
+
+
 def other_work_rows(task, already_offered=()):
     """
     The rest of the job, grouped the way the diagram is: one row per part.
@@ -401,6 +411,14 @@ def other_work_rows(task, already_offered=()):
     task_id = task["task_id"]
     multi = (task.get("part_count") or 1) > 1
 
+    # The lanes the strip above already carries. A paused card's highlighted
+    # press is a lane's continuation; the same lane listed again down here,
+    # under a different activity, is the same destination offered twice - an
+    # assembler was shown "Resume Part 1 Border sheeting" and "Back to Part 1
+    # Border" for one border. So the exclusion is by LANE, whichever of its
+    # activities the strip named.
+    offered_lanes = _lanes_named(already_offered)
+
     by_part = {}
     for destination in switch_destinations(task):
         part, phase, activity = destination["part"], destination["phase"], destination["activity"]
@@ -409,7 +427,7 @@ def other_work_rows(task, already_offered=()):
         # sheeting once there is sheeting to come back to.
         if activity != lane_entry_activity(task, part, phase):
             continue
-        if work_value(task_id, part, phase, activity) in already_offered:
+        if (part, phase) in offered_lanes:
             continue
         recorded = (work_elapsed(task, part, phase, "setup")
                     + work_elapsed(task, part, phase, "production"))
@@ -557,6 +575,12 @@ def resume_target(task):
     Part 3 has not been touched, and answering None there would leave a paused
     card with nothing to press.
 
+    Whichever way the lane is found, its ACTIVITY is the one the ledger says the
+    lane is up to (`lane_entry_activity`): the setup until any sheeting has
+    been recorded, the sheeting after that. The answer is what the card's
+    highlighted press will say and what the press will start, so it has to be
+    true of the recorded work, not of the kind of lane it is.
+
     The opening setup is deliberately not a resume target. It belongs to the
     job rather than to a lane, it is done once at the start, and offering to
     resume it after the sheeting has begun would invite time onto a stage the
@@ -566,13 +590,20 @@ def resume_target(task):
     if last and last["phase"] != "job_setup" and lane_open(task, last.get("part"), last["phase"]):
         return last.get("part"), last["phase"], last["activity"]
 
+    # The two fallbacks name a LANE; what to call the work on it is read from
+    # what the ledger holds for that lane, never assumed. A lane whose setup
+    # has time and whose sheeting has never run is resumed at its setup, and
+    # the card says so - "Resume Part 1 Border sheeting" on such a lane claimed
+    # a continuation that had never started, and was found doing exactly that
+    # in the real workshop channel. Cutting cannot reach here: it is contained
+    # inside a sheeting segment and last_work only ever names main segments.
     cursor_phase = task["current_phase"]
     cursor_part = task.get("current_part")
     if cursor_phase != "completed" and lane_open(task, cursor_part, cursor_phase):
-        return cursor_part, cursor_phase, "production"
+        return cursor_part, cursor_phase, lane_entry_activity(task, cursor_part, cursor_phase)
 
     for part, phase, activity in every_work(task):
-        if activity == "production" and lane_open(task, part, phase):
+        if lane_open(task, part, phase) and activity == lane_entry_activity(task, part, phase):
             return part, phase, activity
     return None
 
