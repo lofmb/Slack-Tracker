@@ -1442,6 +1442,24 @@ def resolve_job(client, body, task_id, user_id, channel_id):
     return task
 
 
+def busy_elsewhere_text(user_id):
+    """
+    The one sentence a maker gets when they try to start work while a
+    DIFFERENT job of theirs is being timed: which job it is, and that Pause on
+    that job is what frees them. Nothing is switched or paused on their behalf.
+
+    Read fresh from the ledger so the number is the job that is timing NOW,
+    not the one the stale card in front of them last knew about.
+    """
+    active = database.get_active_task(user_id)
+    if active:
+        return (
+            "You're already working on T-" + str(active["task_id"]) + " "
+            + active["customer_name"] + ". Pause that job before starting this one."
+        )
+    return "You're already working on another job. Pause that one before starting this."
+
+
 def refusal_text(reason, task, phase=None):
     """
     A refusal, in workshop words: what happened, and what to do about it.
@@ -1451,6 +1469,8 @@ def refusal_text(reason, task, phase=None):
     answer says what the job is actually doing now and what to press instead -
     never a reason code, and never nothing at all.
     """
+    if reason == "another_job_running":
+        return busy_elsewhere_text(task["user_id"])
     lane = work_name(phase or task["current_phase"], "production").lower()
     here = task.get("working_on")
     doing = work_name(here["phase"], here["activity"]).lower() if here else None
@@ -1528,15 +1548,16 @@ def track_command(ack, body, client):
         handle_export(body,client)
         return
 
-    # One job at a time per person. A maker with something already open is told
-    # what it is, rather than quietly given a second job to lose track of.
-    active_task = database.get_active_task(user_id)
-    if active_task:
+    # One timer at a time per person. A maker may hold several unfinished
+    # jobs - each paused one keeps its card - but creating a job starts its
+    # setup clock, so a maker who is timing another job right now is told
+    # which one, and that Pause on it is what frees them. Nothing is paused
+    # on their behalf.
+    if database.get_active_task(user_id):
         client.chat_postEphemeral(
             channel=body["channel_id"],
             user=user_id,
-            text=f"You already have an active job: {active_task['task_description']}. Finish or pause it before starting another."
-            
+            text=busy_elsewhere_text(user_id),
         )
         return
     # The first of the two intake forms. private_metadata carries the channel
@@ -1963,15 +1984,28 @@ def handle_step_2(ack, body, client):
 
     ack(response_action="clear")
 
-    task_id = database.create_task(
-        user_id=user_id,
-        channel_id=team_channel_id,
-        customer_name=prev_data["customer_name"],
-        invoice_number=prev_data["invoice_number"],
-        task_description=prev_data["task_description"],
-        due_date=prev_data["due_date"],
-        parts=parts,
-    )
+    try:
+        task_id = database.create_task(
+            user_id=user_id,
+            channel_id=team_channel_id,
+            customer_name=prev_data["customer_name"],
+            invoice_number=prev_data["invoice_number"],
+            task_description=prev_data["task_description"],
+            due_date=prev_data["due_date"],
+            parts=parts,
+        )
+    except database.TrackerRefused as refusal:
+        # /track checked this before the form opened, but the maker may have
+        # resumed another job from its card while the form was up. Creating
+        # would start a second timer, so LMSA said no and nothing was made.
+        if refusal.reason != "another_job_running":
+            raise
+        client.chat_postEphemeral(
+            channel=team_channel_id,
+            user=user_id,
+            text=busy_elsewhere_text(user_id),
+        )
+        return
 
     # Submitting this form is the handover into the workshop: the maker has the
     # job and is already getting it ready. So the setup timer is running by the

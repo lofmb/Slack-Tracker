@@ -703,7 +703,7 @@ def _view_by_number(task_id):
     try:
         return _call("GET", f"/jobs/by-number/{int(task_id)}")
     except TrackerRefused as refusal:
-        if refusal.reason in ("job_not_found", "no_open_job"):
+        if refusal.reason == "job_not_found":
             return None
         raise
 
@@ -799,14 +799,34 @@ def create_task(user_id, channel_id, customer_name, invoice_number, task_descrip
 
 
 def get_active_task(user_id):
-    """The job a maker currently has open, if any."""
+    """
+    The job this maker is TIMING right now, if any.
+
+    Not "the job they have open": a maker may hold several unfinished jobs,
+    paused, and each keeps its own card. Only one may be accruing time, and
+    this is that one. It is what /track asks before opening the intake form,
+    and what a refusal names when a press on one job is turned down because
+    another is running.
+    """
     try:
-        view = _call("GET", f"/jobs/open/{user_id}")
+        view = _call("GET", f"/jobs/active/slack:{user_id}")
     except TrackerRefused as refusal:
-        if refusal.reason in ("no_open_job", "job_not_found"):
+        if refusal.reason == "no_active_job":
             return None
         raise
     return _row(view, _timing(view["job"]["id"]))
+
+
+def get_open_tasks(user_id):
+    """
+    Every unfinished job this maker holds, newest first — timing or paused.
+
+    A paused job is still theirs: it stays here with everything it recorded
+    until it is finished or cancelled, and its card in their DM is the way
+    back to it.
+    """
+    data = _call("GET", f"/jobs/open/{user_id}") or {}
+    return [_row(view, _timing(view["job"]["id"])) for view in data.get("jobs") or []]
 
 
 def get_task(task_id):
