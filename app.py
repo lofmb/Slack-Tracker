@@ -99,8 +99,12 @@ def notes_modal_view(metadata, summary_text):
                     "type": "plain_text_input",
                     "multiline": True,
                     "action_id": "issues",
+                    # "parts", not "pieces". The workshop word for what a job
+                    # is made of is a part, and it is the word every other
+                    # string here uses; this placeholder was the last one that
+                    # did not.
                     "placeholder": {"type": "plain_text",
-                                    "text": "Breakages, wrong material, missing pieces"}
+                                    "text": "Breakages, wrong material, missing parts"}
                 }
             }
         ]
@@ -1072,7 +1076,13 @@ def _lane_lines(task, part, phase):
     on_this_lane = here.get("phase") == phase and here.get("part") == part
     lane = lane_of(task, part, phase)
     if not lane.get("present", True):
-        return ["*" + LANE_NAMES[phase] + "*  not on this part"]
+        # "not on this part" is true of a job drawn as several, where the
+        # assembler is told which part throughout. On a job drawn as one it was
+        # the only place a Part reached the assembler at all - a word for
+        # something they had never been shown and did not need. The lane is
+        # simply not on the JOB.
+        absent = "part" if (task.get("part_count") or 1) > 1 else "job"
+        return ["*" + LANE_NAMES[phase] + "*  not on this " + absent]
     setup = work_elapsed(task, part, phase, "setup")
     production = work_elapsed(task, part, phase, "production")
     if not setup and not production and not on_this_lane:
