@@ -1606,16 +1606,76 @@ def linear_forward(task):
     return None
 
 
-def linear_actions(task):
+def _linear_jig_button(task):
     """
-    What the card offers: the forward move, Pause, and nothing that is not
-    about the work in hand.
+    The jig, as the linear card words it: "Add a Jig", always.
 
-    Cutting and the jig qualify - both describe the sheeting being done at that
-    moment. Moving to some other stage of the job does not, and is deliberately
-    absent: the route is the route. An assembler who needs a different job
-    pauses this one and goes to that one, which is the rule the engine already
-    enforces.
+    The old card said "Set jig / template" the first time and "Add jig" after
+    that, which asked the assembler to read a distinction that only exists
+    inside the database - the record is appended either way. One label is the
+    truthful one, and it is the same label whether the lane holds no jig, one,
+    or several. The legacy card keeps its own wording: changing that would
+    alter a renderer that is deliberately frozen.
+    """
+    here = task.get("working_on") or {}
+    if here.get("phase") not in ("field_sheeting", "border_sheeting"):
+        return None
+    return _button(
+        "Add a Jig", "trk_add_jig",
+        work_value(task["task_id"], here.get("part"), here["phase"], "production"),
+    )
+
+
+def linear_secondary(task):
+    """
+    What More opens: the actions that are real right now, and nothing else.
+
+    These are all things an assembler sometimes needs and rarely needs. On the
+    card they competed with the one press that moves the job on, which is the
+    clutter the live acceptance run found. Underneath More they keep every bit
+    of their behaviour - Cancel still carries its own confirmation, the jig
+    still opens its form - while the card that gets read a hundred times a day
+    says only what is happening and what to press.
+
+    A state with nothing valid returns nothing, and the card then shows no More
+    at all: a button that opens an empty list is worse than no button.
+    """
+    here = task.get("working_on") or {}
+    cutting = task.get("cutting_now")
+    buttons = []
+
+    # Cutting belongs to sheeting that is actually running, and never to
+    # packing. Once a cut IS running it stops being a secondary action and
+    # takes the main press instead - see linear_actions.
+    if here and not cutting and here.get("phase") != "packing" \
+            and here.get("activity") == "production":
+        buttons.append(_button(
+            "Start cutting", "trk_start_cutting",
+            work_value(task["task_id"], here.get("part"), here["phase"], "production"),
+        ))
+
+    jig = _linear_jig_button(task)
+    if jig:
+        buttons.append(jig)
+
+    # Looking after the job rather than working it. Same gating as the row that
+    # used to carry these at the foot of the card, so nothing became available
+    # that was not available before - they have only moved.
+    buttons.extend(_admin_actions(task))
+    return buttons
+
+
+def linear_actions(task, expanded=False):
+    """
+    What the card offers: the forward move, Pause, and More. Nothing else.
+
+    The route is the route. An assembler who needs a different job pauses this
+    one and goes to that one, which is the rule the engine already enforces.
+
+    Everything that is not "what is happening, and what moves it on" sits
+    behind More. The one exception is a cut that is already running: at that
+    moment stopping it IS the forward move, because the lane cannot be finished
+    until it is resolved, so it takes the main press rather than hiding.
     """
     task_id = task["task_id"]
     here = task.get("working_on")
@@ -1638,19 +1698,17 @@ def linear_actions(task):
             "Pause setup" if here["activity"] == "setup" else "Pause",
             "trk_stop_task", work_value(task_id),
         ))
-        if not cutting and here["phase"] != "packing" and here["activity"] == "production":
-            buttons.append(_button(
-                "Start cutting", "trk_start_cutting",
-                work_value(task_id, here.get("part"), here["phase"], "production"),
-            ))
 
-    jig = _jig_button(task)
-    if jig:
-        buttons.append(jig)
+    if linear_secondary(task):
+        buttons.append(_button(
+            "Less" if expanded else "More",
+            "trk_less" if expanded else "trk_more",
+            work_value(task_id),
+        ))
     return buttons
 
 
-def linear_card(task, note=None):
+def linear_card(task, note=None, expanded=False):
     """
     The card for a job that runs one route. Returns (fallback text, blocks).
 
@@ -1661,6 +1719,12 @@ def linear_card(task, note=None):
     WHILE A TIMER IS RUNNING THE CARD PRINTS NO DURATION ANYWHERE, for the
     reason the card above gives: Slack does not tick, so a figure beside
     running work is already wrong when it is drawn.
+
+    `expanded` is what More has just been pressed: the secondary row is drawn
+    under the main one and More reads Less. It is not stored anywhere, because
+    it should not be - every other press re-renders the card from the job
+    alone, so the card closes itself again the moment the assembler does
+    anything. Opened, used, gone.
     """
     task_id = task["task_id"]
     blocks = [{
@@ -1672,13 +1736,24 @@ def linear_card(task, note=None):
     if facts:
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": facts}]})
 
-    actions = linear_actions(task)
+    actions = linear_actions(task, expanded=expanded)
     if actions:
         blocks.append({
             "type": "actions",
             "block_id": "task_actions_" + str(task_id),
             "elements": actions,
         })
+
+    # What More opens. Directly under the main row, so the thing just asked for
+    # appears where the press was, rather than at the foot of the card.
+    if expanded:
+        secondary = linear_secondary(task)
+        if secondary:
+            blocks.append({
+                "type": "actions",
+                "block_id": "task_more_" + str(task_id),
+                "elements": secondary,
+            })
 
     # Below the buttons, never above: a confirmation of something just done
     # must not push the work the assembler is holding down the card.
@@ -1690,14 +1765,6 @@ def linear_card(task, note=None):
         "type": "context",
         "elements": [{"type": "mrkdwn", "text": _stage_line(task)}],
     })
-
-    admin = _admin_actions(task)
-    if admin:
-        blocks.append({
-            "type": "actions",
-            "block_id": "task_admin_" + str(task_id),
-            "elements": admin,
-        })
 
     blocks.append({
         "type": "context",
@@ -1712,7 +1779,7 @@ def linear_card(task, note=None):
     return summary, blocks
 
 
-def render_card(task, note=None):
+def render_card(task, note=None, expanded=False):
     """
     Which card this job gets.
 
@@ -1724,13 +1791,16 @@ def render_card(task, note=None):
     The test is the job's own shape, so nothing has to be recorded anywhere: a
     job created before this existed still has its parts and still gets the card
     that can show them.
+
+    `expanded` reaches the linear card only. The legacy card has no More: it is
+    frozen, and it already shows everything it offers.
     """
     if (task.get("part_count") or 1) > 1:
         return job_card(task, note=note)
-    return linear_card(task, note=note)
+    return linear_card(task, note=note, expanded=expanded)
 
 
-def update_card(client, task, channel_id, note=None):
+def update_card(client, task, channel_id, note=None, expanded=False):
     """
     Rewrite the job's card where it already is - or post one, if the job has
     somehow ended up without a card to rewrite.
@@ -1738,7 +1808,7 @@ def update_card(client, task, channel_id, note=None):
     if not task.get("message_ts"):
         repost_card(client, task, channel_id, note=note)
         return
-    text, blocks = render_card(task, note=note)
+    text, blocks = render_card(task, note=note, expanded=expanded)
     client.chat_update(
         channel=channel_id,
         ts=task["message_ts"],
@@ -2545,6 +2615,48 @@ def handle_lane_details(ack, body, client):
     update_card(client, database.get_task(task_id), channel_id)
 
 
+@app.action("trk_more")
+def handle_more(ack, body, client):
+    """
+    Show the actions that are not part of moving the job on.
+
+    It changes nothing about the job: the card is redrawn from the same row it
+    was already drawn from, with the secondary row underneath. So there is no
+    work to record, no timer to touch, and nothing to undo if the assembler
+    pressed it by accident - Less puts it back, and so does doing anything at
+    all, because every other press redraws the card closed.
+    """
+    ack()
+    _redraw_with_more(client, body, expanded=True)
+
+
+@app.action("trk_less")
+def handle_less(ack, body, client):
+    """Put More away again."""
+    ack()
+    _redraw_with_more(client, body, expanded=False)
+
+
+def _redraw_with_more(client, body, expanded):
+    """
+    The shared half of More and Less.
+
+    It still goes through resolve_job, because a card that has been sitting in
+    a DM since yesterday may be pointing at a job that is finished, cancelled
+    or somebody else's - and finding that out from a harmless press is better
+    than finding it out from Cancel.
+    """
+    task_id = read_work_value(body["actions"][0]["value"])[0]
+    user_id = body["user"]["id"]
+    channel_id = body["container"]["channel_id"]
+
+    task = resolve_job(client, body, task_id, user_id, channel_id)
+    if task is None:
+        return
+
+    update_card(client, task, channel_id, expanded=expanded)
+
+
 @app.action("trk_stop_task")
 def handle_stop(ack, body, client):
     """
@@ -2816,13 +2928,46 @@ def handle_add_jig(ack, body, client):
         )
         return
 
-    named = work_name(phase, "production", part_label(task, part))
+    # The LANE, not the step. A jig belongs to the field or the border, and it
+    # is normally established during that lane's setup - so a form headed
+    # "Field sheeting" over a card reading "Field setup - running" looked like
+    # the two disagreed. Naming the lane is true at either end of it.
+    lane_word = "Field" if phase == "field_sheeting" else "Border"
+    numbered = part_label(task, part)
+    lane_phrase = ("the %s lane" % lane_word) if numbered is None \
+        else ("Part %s's %s lane" % (numbered, lane_word))
+
+    already = (lane_of(task, part, phase) or {}).get("jigs")
+    jig_blocks = [
+        {
+            "type": "input",
+            "block_id": "jig_block",
+            "label": {"type": "plain_text", "text": "Jig or template used on " + lane_phrase},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "jig_size",
+                "placeholder": {"type": "plain_text",
+                                "text": "e.g. 49.6, 49.4/49.8, or template"},
+            },
+        },
+    ]
+    if already:
+        # Only where it is actually true. On a lane with nothing recorded this
+        # sentence would be answering a question nobody asked.
+        jig_blocks.append({
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": "This is added to the lane. Anything already recorded on it stays as it is.",
+            }],
+        })
+
     client.views_open(
         trigger_id=body["trigger_id"],
         view={
             "type": "modal",
             "callback_id": "trk_add_jig_modal",
-            "title": {"type": "plain_text", "text": "Jig or template"},
+            "title": {"type": "plain_text", "text": "Add a Jig"},
             "submit": {"type": "plain_text", "text": "Save"},
             "close": {"type": "plain_text", "text": "Cancel"},
             "private_metadata": json.dumps({
@@ -2831,19 +2976,7 @@ def handle_add_jig(ack, body, client):
                 "part": part,
                 "phase": phase,
             }),
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "jig_block",
-                    "label": {"type": "plain_text", "text": "Jig or template for " + lower_name(named)},
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "jig_size",
-                        "placeholder": {"type": "plain_text",
-                                        "text": "e.g. 49.6, 49.4/49.8, or template"},
-                    },
-                },
-            ],
+            "blocks": jig_blocks,
         },
     )
 
