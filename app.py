@@ -701,13 +701,19 @@ def _jig_button(task):
     )
 
 
-def _finish_button(task, part, phase):
+def _finish_button(task, part, phase, style=None):
     """
     The one press that says a lane is done.
 
     Nothing else on the card finishes anything, and it is deliberately not
     offered until the lane has some sheeting time on it: straight out of setup
     the forward move is to START the sheeting, not to declare it over.
+
+    `style` is for the linear card, where finishing the lane genuinely IS the
+    forward move and the card highlights whichever press that is. On the card
+    that offers every item of work side by side it stays unstyled: there the
+    forward move is a choice among several, and colouring one in would make it
+    look like the required next step.
     """
     if not lane_open(task, part, phase):
         return None
@@ -731,6 +737,7 @@ def _finish_button(task, part, phase):
         label,
         "trk_complete_task",
         work_value(task["task_id"], part, phase, "production"),
+        style=style,
         confirm={
             "title": {"type": "plain_text", "text": "Finished?"},
             # Slack renders a confirmation's text as PLAIN TEXT. Asterisks
@@ -1044,34 +1051,6 @@ def read_difficulty(typed):
     if value < 1:
         return None, DIFFICULTY_ERROR
     return str(value), None
-
-
-PART_COUNT_ERROR = "How many parts? A whole number, 1 or more."
-
-
-def read_part_count(typed):
-    """
-    How many parts the diagram is drawn as.
-
-    A whole number, at least one, at most two digits. THERE IS NO BUSINESS
-    MAXIMUM: two digits is the width of the box, not a rule about how many
-    parts a job may have, and if a job ever needs more the limit to change is
-    that width.
-
-    Returns (count, error). A blank box means one part, because that is what
-    the field is pre-filled with and what most jobs are.
-    """
-    raw = (typed or "").strip()
-    if not raw:
-        return 1, None
-    if not all(character in "0123456789" for character in raw):
-        return None, PART_COUNT_ERROR
-    if len(raw) > 2:
-        return None, PART_COUNT_ERROR
-    value = int(raw)
-    if value < 1:
-        return None, PART_COUNT_ERROR
-    return value, None
 
 
 def _lane_lines(task, part, phase):
@@ -1406,6 +1385,324 @@ def job_card(task, note=None):
     return summary, blocks
 
 
+# ---------------------------------------------------------------------------
+# The linear card: one route through a job, one press at a time
+# ---------------------------------------------------------------------------
+#
+# A job runs the same way every time, and this card shows an assembler only the
+# step they are on and the one press that moves it on:
+#
+#     Initial setup -> Field setup -> Field sheeting
+#                   -> Border setup -> Border sheeting
+#                   -> Packing -> Finish
+#
+# A lane the diagram does not have drops out of that route entirely, so a
+# field-only job never sees a border and never has to say it has none.
+#
+# The card above offers every item of work on the job side by side and lets the
+# assembler choose. That was deliberate, and it is still what a job drawn as
+# several parts gets - render_card sends those to it untouched. What using it
+# taught us is that showing every valid destination shows an assembler the
+# state machine rather than the job. Nothing underneath changes: the same
+# segments, the same pause, the same one timer per person. Only what the card
+# puts in front of the assembler is narrower.
+
+
+def _only_part(task):
+    """
+    The part a linear job's lane work belongs to.
+
+    There is exactly one, because this card is only ever built for a job drawn
+    as one part. The engine still files every lane segment against a part, and
+    this is where that part comes from; the assembler is never shown it.
+    """
+    rows = task.get("parts") or []
+    return rows[0].get("part") if rows else None
+
+
+def linear_stages(task):
+    """
+    The route this job takes, in order, as (part, phase, activity).
+
+    Built from what the job actually contains rather than from a fixed list: a
+    lane the diagram does not have is not a step, so a border-only job runs
+    Initial setup -> Border setup -> Border sheeting -> Packing and the field
+    is never mentioned.
+
+    Setup is a step of its own in front of each lane's sheeting, because it is
+    real labour - reading the drawings, fetching the material, finding and
+    testing the jig - and folding it back into the sheeting would lose the one
+    distinction this tracker was extended to record.
+    """
+    part = _only_part(task)
+    stages = [(None, "job_setup", "setup")]
+    for phase in ("field_sheeting", "border_sheeting"):
+        if not lane_of(task, part, phase).get("present", True):
+            continue
+        stages.append((part, phase, "setup"))
+        stages.append((part, phase, "production"))
+    stages.append((None, "packing", "production"))
+    return stages
+
+
+def _stage_after(stages, phase, activity):
+    """The step that follows one, or None at the end of the route."""
+    for index, (_part, s_phase, s_activity) in enumerate(stages):
+        if s_phase == phase and s_activity == activity:
+            return stages[index + 1] if index + 1 < len(stages) else None
+    return None
+
+
+def _opening_setup_behind(task):
+    """
+    Whether the job has moved past its own opening setup.
+
+    The same test the equal-choice card makes, read the other way round: the
+    opening setup is behind the assembler once any other work has been timed,
+    or once anything else is being timed now. A lane with one second on it
+    means they left it, and leaving is a decision.
+    """
+    here = task.get("working_on") or {}
+    if here.get("phase") == "job_setup":
+        return False
+    if here:
+        return True
+    return any(
+        work_elapsed(task, part, phase, activity)
+        for part, phase, activity in every_work(task)
+    )
+
+
+def _stage_done(task, part, phase, activity):
+    """
+    Whether a step is behind the assembler.
+
+    A lane that is finished, or that the diagram does not have, is behind them
+    whichever of its two steps is being asked about. A lane's SETUP is behind
+    them once its sheeting has run: the setup is the way in, and this card does
+    not offer a way back to it once the sheeting has started.
+    """
+    if phase == "job_setup":
+        return _opening_setup_behind(task)
+    if lane_state(task, part, phase) in ("complete", "skipped"):
+        return True
+    if activity == "setup":
+        return bool(work_elapsed(task, part, phase, "production"))
+    return False
+
+
+def _stage_name(phase, activity):
+    """What a step is called on the card. The opening setup is the job's own."""
+    if phase == "job_setup":
+        return "Initial setup"
+    return work_name(phase, activity)
+
+
+def _stage_line(task):
+    """
+    The route in one grey line, with a tick against every step already behind.
+
+    The equal-choice card answered "how far along is this job?" by listing
+    every remaining destination as a button. A linear card has no such list, so
+    without this an assembler would be told what they are on and nothing about
+    where that sits. A tick is a mark rather than a sentence, and the step in
+    hand is the one in bold.
+    """
+    here = task.get("working_on") or {}
+    marks = []
+    for part, phase, activity in linear_stages(task):
+        name = _stage_name(phase, activity)
+        on_it = here.get("phase") == phase and (
+            phase == "job_setup" or here.get("activity") == activity
+        )
+        if on_it:
+            marks.append("*" + name + "*")
+        elif _stage_done(task, part, phase, activity):
+            marks.append("✓ " + name)
+        else:
+            marks.append(name)
+    return "  ·  ".join(marks)
+
+
+def linear_forward(task):
+    """
+    The one press that moves this job on from where it is. Never more than one.
+
+    While something is timed the forward move is what that work leads to: a
+    setup leads to the work it prepares, and sheeting or packing leads to
+    declaring it finished. While nothing is timed it is the first step of the
+    route that is not already behind the assembler - resumed when there is
+    recorded work to carry on with, started when there is not.
+
+    Cutting is not handled here. It happens INSIDE the sheeting and moves the
+    job nowhere, so it is never the forward move; the caller puts its own press
+    up while it runs.
+    """
+    task_id = task["task_id"]
+    here = task.get("working_on")
+    stages = linear_stages(task)
+
+    if here:
+        phase, activity = here["phase"], here["activity"]
+        if activity == "production":
+            # Sheeting or packing: the move is to say it is finished. The
+            # confirmation on that button is where an assembler about to close
+            # something for good reads what it means.
+            return _finish_button(task, here.get("part"), phase, style="primary")
+        following = _stage_after(stages, phase, activity)
+        if following is None:
+            return None
+        next_part, next_phase, next_activity = following
+        return _start_button(
+            "Start " + lower_name(_stage_name(next_phase, next_activity)),
+            task_id, next_part, next_phase, next_activity, style="primary",
+        )
+
+    for part, phase, activity in stages:
+        if _stage_done(task, part, phase, activity):
+            continue
+        if phase == "job_setup":
+            return _start_button(
+                "Resume initial setup", task_id, None, "job_setup", "setup",
+                style="primary",
+            )
+        recorded = work_elapsed(task, part, phase, activity)
+        return _start_button(
+            ("Resume " if recorded else "Start ") + lower_name(_stage_name(phase, activity)),
+            task_id, part, phase, activity, style="primary",
+        )
+
+    # Every step is behind them. The job itself is the only thing left to end.
+    if job_is_finishable(task) and task["current_phase"] != "completed":
+        return _button("Finish the job", "trk_complete_task", work_value(task_id),
+                       style="primary")
+    return None
+
+
+def linear_actions(task):
+    """
+    What the card offers: the forward move, Pause, and nothing that is not
+    about the work in hand.
+
+    Cutting and the jig qualify - both describe the sheeting being done at that
+    moment. Moving to some other stage of the job does not, and is deliberately
+    absent: the route is the route. An assembler who needs a different job
+    pauses this one and goes to that one, which is the rule the engine already
+    enforces.
+    """
+    task_id = task["task_id"]
+    here = task.get("working_on")
+    cutting = task.get("cutting_now")
+    buttons = []
+
+    if cutting:
+        # While the cutting runs it IS the press that moves things on: the
+        # sheeting underneath has not stopped, and nothing else should be
+        # offered until the assembler is back at the bench.
+        buttons.append(_button("Stop cutting", "trk_stop_cutting", work_value(task_id),
+                               style="primary"))
+    else:
+        forward = linear_forward(task)
+        if forward:
+            buttons.append(forward)
+
+    if here:
+        buttons.append(_button(
+            "Pause setup" if here["activity"] == "setup" else "Pause",
+            "trk_stop_task", work_value(task_id),
+        ))
+        if not cutting and here["phase"] != "packing" and here["activity"] == "production":
+            buttons.append(_button(
+                "Start cutting", "trk_start_cutting",
+                work_value(task_id, here.get("part"), here["phase"], "production"),
+            ))
+
+    jig = _jig_button(task)
+    if jig:
+        buttons.append(jig)
+    return buttons
+
+
+def linear_card(task, note=None):
+    """
+    The card for a job that runs one route. Returns (fallback text, blocks).
+
+    The same questions the equal-choice card answers, with the last one
+    narrowed to a single press: what am I on, what is true of it, what do I
+    press, and where does that sit in the job.
+
+    WHILE A TIMER IS RUNNING THE CARD PRINTS NO DURATION ANYWHERE, for the
+    reason the card above gives: Slack does not tick, so a figure beside
+    running work is already wrong when it is drawn.
+    """
+    task_id = task["task_id"]
+    blocks = [{
+        "type": "header",
+        "text": {"type": "plain_text", "text": _headline(task), "emoji": True},
+    }]
+
+    facts = _facts_line(task)
+    if facts:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": facts}]})
+
+    actions = linear_actions(task)
+    if actions:
+        blocks.append({
+            "type": "actions",
+            "block_id": "task_actions_" + str(task_id),
+            "elements": actions,
+        })
+
+    # Below the buttons, never above: a confirmation of something just done
+    # must not push the work the assembler is holding down the card.
+    if note:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": note}]})
+
+    blocks.append({"type": "divider"})
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": _stage_line(task)}],
+    })
+
+    admin = _admin_actions(task)
+    if admin:
+        blocks.append({
+            "type": "actions",
+            "block_id": "task_admin_" + str(task_id),
+            "elements": admin,
+        })
+
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": "\n".join(_foot_lines(task))}],
+    })
+
+    here = task.get("working_on") or {}
+    if not here:
+        summary = "T-" + str(task_id) + ": paused"
+    else:
+        summary = "T-" + str(task_id) + ": " + _stage_name(here["phase"], here["activity"])
+    return summary, blocks
+
+
+def render_card(task, note=None):
+    """
+    Which card this job gets.
+
+    A job drawn as several parts has work the linear route cannot express - two
+    fields, two borders, and an assembler who genuinely does choose between
+    them - so it keeps the card it was made with, unchanged. Everything else
+    gets the route.
+
+    The test is the job's own shape, so nothing has to be recorded anywhere: a
+    job created before this existed still has its parts and still gets the card
+    that can show them.
+    """
+    if (task.get("part_count") or 1) > 1:
+        return job_card(task, note=note)
+    return linear_card(task, note=note)
+
+
 def update_card(client, task, channel_id, note=None):
     """
     Rewrite the job's card where it already is - or post one, if the job has
@@ -1414,7 +1711,7 @@ def update_card(client, task, channel_id, note=None):
     if not task.get("message_ts"):
         repost_card(client, task, channel_id, note=note)
         return
-    text, blocks = job_card(task, note=note)
+    text, blocks = render_card(task, note=note)
     client.chat_update(
         channel=channel_id,
         ts=task["message_ts"],
@@ -1432,7 +1729,7 @@ def repost_card(client, task, channel_id, note=None):
     behind the modal that was just filled in, and an assembler should not have to go
     looking for the job they are working on.
     """
-    text, blocks = job_card(task, note=note)
+    text, blocks = render_card(task, note=note)
     if task.get("message_ts"):
         try:
             client.chat_delete(channel=channel_id, ts=task["message_ts"])
@@ -1609,73 +1906,9 @@ def track_command(ack, body, client):
             text=busy_elsewhere_text(active),
         )
         return
-    # The first of the two intake forms. private_metadata carries the channel
-    # the command came from, so the job can be announced back to the same room.
-    client.views_open(
-        trigger_id=body["trigger_id"],
-        view={
-            "type": "modal",
-            "callback_id": "trk_track_step_1",  # ID used to catch the submission
-            "title": {"type": "plain_text", "text": "New job - 1 of 2"},
-            "private_metadata":body["channel_id"],
-            "submit": {"type": "plain_text", "text": "Next"},
-            "close": {"type": "plain_text", "text": "Cancel"},
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "customer_block",
-                    "label": {"type": "plain_text", "text": "Customer name"},
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "customer_name"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "invoice_block",
-                    "label": {"type": "plain_text", "text": "Invoice / Pro Forma number"},
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "invoice_num"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "task_block",
-                    "label": {"type": "plain_text", "text": "Job description"},
-                    "element": {
-                        "type": "plain_text_input",
-                        "multiline": True,
-                        "action_id": "task_desc"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "date_block",
-                    "optional": True,
-                    "label": {"type": "plain_text", "text": DUE_DATE_LABEL},
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "due_date",
-                        "placeholder": {"type": "plain_text", "text": DUE_DATE_HINT}
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "parts_block",
-                    "label": {"type": "plain_text", "text": "Number of parts"},
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "part_count",
-                        "initial_value": "1",
-                        "max_length": 2,
-                    },
-                    "hint": {"type": "plain_text",
-                             "text": "How many parts the diagram is drawn as."},
-                }
-            ]
-        }
-    )
+    # The intake form. private_metadata carries the channel the command came
+    # from, so the job can be announced back to the same room.
+    client.views_open(trigger_id=body["trigger_id"], view=new_job_view(body["channel_id"]))
 
 # ---------------------------------------------------------------------------
 # The spreadsheet export
@@ -1875,120 +2108,118 @@ def handle_export(body, client):
 # ---------------------------------------------------------------------------
 # Job intake
 # ---------------------------------------------------------------------------
-# Two forms, then the job exists. Submitting the second one is the handover
-# into workshop work: it creates the job and starts its setup in the same
-# transaction, which is why the card that follows has no Start button.
+# ONE form, then the job exists. Submitting it is the handover into workshop
+# work: it creates the job and starts its setup in the same transaction, which
+# is why the card that follows has no Start button.
+#
+# It asks four things, and they are the four an assembler has in front of them
+# when a job is handed over: who it is for, which paperwork it is on, when it
+# is wanted, and what work is on it. It does NOT ask for a job description, and
+# it does not ask for a number of parts - that was a question about how the
+# tracker files the work rather than about the work itself.
 
-@app.view("trk_track_step_1")
-def handle_step_1(ack,body,client,):
-    vals = body["view"]["state"]["values"]
-    channel_id = body["view"]["private_metadata"]
+WORK_FIELD_ONLY = "field"
+WORK_BORDER_ONLY = "border"
+WORK_BOTH = "both"
 
-    customer_name = vals["customer_block"]["customer_name"]["value"]
-    invoice_number = vals["invoice_block"]["invoice_num"]["value"]
-    task_description = vals["task_block"]["task_desc"]["value"]
-    # An empty box is carried as nothing at all, not as the word "N/A". Nobody
-    # has given this assembler a date yet; that is not a job with no deadline.
-    due_date, due_date_error = read_due_date(vals["date_block"]["due_date"]["value"])
-    if due_date_error:
-        # Sent back to the box it belongs to, so the assembler reads the message
-        # under the date rather than losing the whole form.
-        ack(response_action="errors", errors={"date_block": due_date_error})
-        return
-
-    part_count, part_count_error = read_part_count(
-        _typed(vals, "parts_block", "part_count"))
-    if part_count_error:
-        ack(response_action="errors", errors={"parts_block": part_count_error})
-        return
-
-    # private_metadata is the only way to carry these across to the pushed
-    # form, which arrives as a separate submission.
-    step1_data = {
-        "channel_id": channel_id,
-        "customer_name": customer_name,
-        "invoice_number": invoice_number,
-        "task_description": task_description,
-        "due_date": due_date,
-        "part_count": part_count,
-    }
-
-    ack(response_action="push", view=step_2_view(step1_data))
+WORK_CHOICE_ERROR = "Say whether the job has a field, a border, or both."
 
 
-def step_2_view(step1_data):
+def new_job_view(channel_id):
     """
-    Screen 2: WHAT WORK EXISTS, and nothing else.
+    The intake form.
 
-    One section per part, each with a Field and a Border tick. That is the
-    whole form. It deliberately does not ask for designs, difficulty, jig or
-    cutting: the assembler filling this in has just been handed the diagram and is
-    establishing the shape of the job. The details are asked for when they
-    first enter that part's lane, which is the moment they are looking at it.
+    The work question is a radio, not two tick boxes: a job has a field, a
+    border or both, and exactly one of those is true. Tick boxes let an
+    assembler submit neither, which is a job that exists and can never be
+    worked - the old form had to check for it in three places. A radio cannot
+    express it at all.
 
-    Checkboxes rather than a text box per lane, because the question is yes or
-    no and a tick answers it without the assembler having to know that leaving a
-    box empty is how you say "there isn't one".
-
-    Every part needs at least one lane, and the FORM enforces it: the block is
-    required, so Slack refuses the submission before it is sent. A part with
-    neither lane is a part that exists and can never be worked, and that is
-    checked again in the handler and once more by the database - three places,
-    because an assembler who already had this form open when it changed still submits
-    the shape they were given. None of that is explained on the screen. A rule
-    the form will not let you break does not need a paragraph telling you not to
-    break it.
+    There is no initial choice. Pre-selecting one would mean a submitted form
+    could be a job nobody actually read, and which lanes a job has is the one
+    answer on this form the tracker cannot get from anywhere else.
     """
-    count = step1_data["part_count"]
-    blocks = [{
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": "*What work is on each part?*"},
-    }]
-    for number in range(1, count + 1):
-        # One tick pair per part, headed by the part's own name - the label IS
-        # the heading, so the form never says "Part 2" twice. On a one-part job
-        # there is nothing to tell it apart from, so it is simply "Work".
-        #
-        # REQUIRED, and that is the whole of the rule. Left optional, Slack
-        # printed "(optional)" after the label - the form said the opposite of
-        # what the workshop means, and a sentence above it was being used to
-        # argue with its own control.
-        blocks.append({
-            "type": "input",
-            "block_id": f"part_{number}",
-            "label": {"type": "plain_text",
-                      "text": "Work" if count == 1 else f"Part {number}"},
-            "element": {
-                "type": "checkboxes",
-                "action_id": "lanes",
-                "options": [
-                    {"text": {"type": "plain_text", "text": "Field"}, "value": "field"},
-                    {"text": {"type": "plain_text", "text": "Border"}, "value": "border"},
-                ],
-            },
-        })
-    blocks.append({
-        "type": "context",
-        "elements": [{"type": "mrkdwn",
-                      "text": "Creating the job starts recording Initial setup time "
-                              "and sends your work card to you in a DM."}],
-    })
     return {
         "type": "modal",
-        "callback_id": "trk_track_step_2",
-        "title": {"type": "plain_text", "text": "New job - 2 of 2"},
+        "callback_id": "trk_new_job",
+        "title": {"type": "plain_text", "text": "New job"},
+        "private_metadata": channel_id,
         "submit": {"type": "plain_text", "text": "Create the job"},
-        "close": {"type": "plain_text", "text": "Back"},
-        "private_metadata": json.dumps(step1_data),
-        "blocks": blocks,
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "customer_block",
+                "label": {"type": "plain_text", "text": "Customer name"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "customer_name",
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "invoice_block",
+                "label": {"type": "plain_text", "text": "Invoice / Pro Forma number"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "invoice_num",
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "date_block",
+                "optional": True,
+                "label": {"type": "plain_text", "text": DUE_DATE_LABEL},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "due_date",
+                    "placeholder": {"type": "plain_text", "text": DUE_DATE_HINT},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "work_block",
+                "label": {"type": "plain_text", "text": "Work on this job"},
+                "element": {
+                    "type": "radio_buttons",
+                    "action_id": "work",
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "Field only"},
+                         "value": WORK_FIELD_ONLY},
+                        {"text": {"type": "plain_text", "text": "Border only"},
+                         "value": WORK_BORDER_ONLY},
+                        {"text": {"type": "plain_text", "text": "Field and border"},
+                         "value": WORK_BOTH},
+                    ],
+                },
+            },
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn",
+                              "text": "Creating the job starts recording Initial setup time "
+                                      "and sends your work card to you in a DM."}],
+            },
+        ],
     }
 
 
-def read_lanes(values, number):
-    """Which lanes were ticked for one part, as a set."""
-    block = values.get(f"part_{number}") or {}
-    chosen = (block.get("lanes") or {}).get("selected_options") or []
-    return {option.get("value") for option in chosen}
+def read_work_required(values):
+    """
+    Which lanes the job has, from the radio. None when nothing was chosen.
+
+    Returns the shape create_task wants for the job's single part. The part is
+    an engine detail - lane work has to be filed against one - and is never a
+    question the assembler is asked.
+    """
+    block = values.get("work_block") or {}
+    chosen = (block.get("work") or {}).get("selected_option") or {}
+    value = chosen.get("value")
+    if value not in (WORK_FIELD_ONLY, WORK_BORDER_ONLY, WORK_BOTH):
+        return None
+    return {
+        "field": value in (WORK_FIELD_ONLY, WORK_BOTH),
+        "border": value in (WORK_BORDER_ONLY, WORK_BOTH),
+    }
 
 
 def _typed(values, block_id, action_id):
@@ -2005,27 +2236,31 @@ def _typed(values, block_id, action_id):
     return (block.get(action_id) or {}).get("value")
 
 
-@app.view("trk_track_step_2")
-def handle_step_2(ack, body, client):
+@app.view("trk_new_job")
+def handle_new_job(ack, body, client):
+    """
+    Create the job, start its setup, and put the card in front of the assembler.
+    """
     user_id = body["user"]["id"]
     vals = body["view"]["state"]["values"]
+    team_channel_id = body["view"]["private_metadata"]
 
-    prev_data = json.loads(body["view"]["private_metadata"])
-    team_channel_id = prev_data["channel_id"]
-    count = prev_data.get("part_count") or 1
+    customer_name = _typed(vals, "customer_block", "customer_name")
+    invoice_number = _typed(vals, "invoice_block", "invoice_num")
 
-    # Every part needs work on it. A part with neither lane is a part that
-    # exists and can never be worked, and the error goes against the part it
-    # is about rather than the top of the form.
-    parts = []
-    for number in range(1, count + 1):
-        lanes = read_lanes(vals, number)
-        if not lanes:
-            ack(response_action="errors", errors={
-                f"part_{number}": "Tick Field, Border, or both.",
-            })
-            return
-        parts.append({"field": "field" in lanes, "border": "border" in lanes})
+    # An empty box is carried as nothing at all, not as the word "N/A". Nobody
+    # has given this assembler a date yet; that is not a job with no deadline.
+    due_date, due_date_error = read_due_date(_typed(vals, "date_block", "due_date"))
+    if due_date_error:
+        # Sent back to the box it belongs to, so the assembler reads the message
+        # under the date rather than losing the whole form.
+        ack(response_action="errors", errors={"date_block": due_date_error})
+        return
+
+    work = read_work_required(vals)
+    if work is None:
+        ack(response_action="errors", errors={"work_block": WORK_CHOICE_ERROR})
+        return
 
     ack(response_action="clear")
 
@@ -2033,11 +2268,14 @@ def handle_step_2(ack, body, client):
         task_id = database.create_task(
             user_id=user_id,
             channel_id=team_channel_id,
-            customer_name=prev_data["customer_name"],
-            invoice_number=prev_data["invoice_number"],
-            task_description=prev_data["task_description"],
-            due_date=prev_data["due_date"],
-            parts=parts,
+            customer_name=customer_name,
+            invoice_number=invoice_number,
+            # No description is asked for, so none is sent. The column keeps
+            # every description a job was ever given; a job made here simply
+            # has not been given one.
+            task_description=None,
+            due_date=due_date,
+            parts=[work],
         )
     except database.TrackerRefused as refusal:
         # /track checked this before the form opened, but the assembler may have
@@ -2055,13 +2293,13 @@ def handle_step_2(ack, body, client):
     # Submitting this form is the handover into the workshop: the assembler has the
     # job and is already getting it ready. So the setup timer is running by the
     # time the card appears, and there is no "Start" button - there is nothing
-    # left to start. That setup is the JOB's, not the first part's.
+    # left to start. That setup is the JOB's, not the first lane's.
     task = database.get_task(task_id)
 
     # chat_postMessage accepts a user id and resolves the DM itself, returning
     # the real D... conversation id in result["channel"]. conversations_open
     # would need the im:write scope, which the LMSA Slack app does not hold.
-    text, blocks = job_card(task)
+    text, blocks = render_card(task)
     result = client.chat_postMessage(channel=user_id, text=text, blocks=blocks)
 
     # Saving the timestamp
@@ -2766,12 +3004,20 @@ def handle_edit(ack, body, client):
                 {
                     "type": "input",
                     "block_id": "task_block",
+                    # Optional, and empty on a job that was never given one.
+                    # The intake form stopped asking for a description, so a
+                    # new job has none - and Slack REFUSES a view whose
+                    # initial_value is null, which would have made Edit
+                    # impossible to open on exactly those jobs. The box stays
+                    # so a description a job already carries can still be read
+                    # and corrected.
+                    "optional": True,
                     "label": {"type": "plain_text", "text": "Job description"},
                     "element": {
                         "type": "plain_text_input",
                         "multiline": True,
                         "action_id": "task_desc",
-                        "initial_value": task["task_description"]
+                        "initial_value": task["task_description"] or ""
                     }
                 },
                 {
@@ -2831,7 +3077,11 @@ def handle_edit_submission(ack, body, client):
     # Collect updated values
     customer_name = vals["customer_block"]["customer_name"]["value"]
     invoice_number = vals["invoice_block"]["invoice_num"]["value"]
-    task_description = vals["task_block"]["task_desc"]["value"]
+    # Blank comes back as nothing, which is what a job with no description is.
+    # An assembler who clears the box has cleared it; LMSA keeps whatever the
+    # row holds only when the key is absent altogether, which is how a form
+    # that never carried the box leaves a description alone.
+    task_description = _typed(vals, "task_block", "task_desc") or None
     design = vals["design_block"]["design"]["value"]
     difficulty, difficulty_error = read_difficulty(
         vals["difficulty_block"]["difficulty"]["value"])
