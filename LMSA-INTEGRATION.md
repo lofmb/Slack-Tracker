@@ -490,6 +490,19 @@ will come back later as ONE secondary press, rather than as a permanent grid.
 Moving to a different customer's job is unchanged and always was: pause this
 one, start or resume that one.
 
+**And Resume still means the ledger, not the route.** The route says what a job
+does in the ordinary case; it does not say what this assembler was doing when
+they stopped, and only one of those is a fact. Written the other way round
+first, the card put "Last on packing — 3s recorded" over a button offering to
+resume the field sheeting: the card contradicting its own history, and a press
+taking somebody somewhere they had not been. Whatever the ledger holds is what
+Resume offers, whether or not the route would have gone there next. The route
+answers only where the ledger has nothing to say — work nobody has started —
+and then the press reads "Start", because that is what it does. Found by the
+real-boundary proofs, which reach a job that has been packed mid-field; the
+card proof walks the route in order, where the two answers always agree, and
+could not have caught it.
+
 Agreed with Luis beforehand: no. This is workshop-originated, from using the
 rebuilt card. It changes no rule from the creator review — nothing auto-starts a
 timer except the handover the assembler submits, one person still times one

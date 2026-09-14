@@ -1530,9 +1530,19 @@ def linear_forward(task):
 
     While something is timed the forward move is what that work leads to: a
     setup leads to the work it prepares, and sheeting or packing leads to
-    declaring it finished. While nothing is timed it is the first step of the
-    route that is not already behind the assembler - resumed when there is
-    recorded work to carry on with, started when there is not.
+    declaring it finished.
+
+    WHILE NOTHING IS TIMED, THE LEDGER DECIDES - NOT THE ROUTE. The route says
+    what a job does in the ordinary case; it does not say what this assembler
+    was doing when they stopped, and only one of those is a fact. Reading the
+    route instead put a card up that said "Last on packing - 3s recorded" over
+    a button offering to resume the field sheeting: the card contradicting its
+    own history, and an assembler pressing Resume being taken somewhere they
+    had not been. Whatever the ledger holds is what Resume means.
+
+    The route is the answer only where the ledger has nothing to say - work
+    nobody has started yet - and then the press reads "Start", because starting
+    is what it does.
 
     Cutting is not handled here. It happens INSIDE the sheeting and moves the
     job nowhere, so it is never the forward move; the caller puts its own press
@@ -1558,14 +1568,31 @@ def linear_forward(task):
             task_id, next_part, next_phase, next_activity, style="primary",
         )
 
+    # The job's own opening setup, while it is still live work. It is not a
+    # resume target for resume_target - it belongs to the job rather than to a
+    # lane - so it is asked for on its own terms, first.
+    if initial_setup_resumable(task):
+        return _start_button(
+            "Resume initial setup", task_id, None, "job_setup", "setup",
+            style="primary",
+        )
+
+    # What the ledger says they were last doing, if it says anything. Only work
+    # with time ON it counts: resume_target falls back to naming a lane nobody
+    # has touched, and offering to "resume" that would be inventing a history
+    # the job does not have.
+    resume = resume_target(task)
+    if resume:
+        part, phase, activity = resume
+        if work_elapsed(task, part, phase, activity):
+            return _start_button(
+                "Resume " + lower_name(_stage_name(phase, activity)),
+                task_id, part, phase, activity, style="primary",
+            )
+
     for part, phase, activity in stages:
         if _stage_done(task, part, phase, activity):
             continue
-        if phase == "job_setup":
-            return _start_button(
-                "Resume initial setup", task_id, None, "job_setup", "setup",
-                style="primary",
-            )
         recorded = work_elapsed(task, part, phase, activity)
         return _start_button(
             ("Resume " if recorded else "Start ") + lower_name(_stage_name(phase, activity)),
