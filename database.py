@@ -1131,6 +1131,10 @@ def set_lane_details(task_id, phase, design, difficulty, jig=None, part=None):
 
     which = "field" if phase == "field_sheeting" else "border"
     lane = _lane_by_number(row, target_part, which)
+    # Only a BORDER can be absent and then put back here. A job without a field
+    # says so when it is created and is corrected by editing the job, so there
+    # is nothing at this point that could revert it - the asymmetry is real, not
+    # an oversight.
     if lane.get("present") is False and phase == "border_sheeting":
         outcome = _post_border_skip_revert(job_id, actor, "set_lane_details_unskip", target_part)
         if outcome != "reverted":

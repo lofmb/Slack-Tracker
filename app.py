@@ -3507,22 +3507,20 @@ def handle_notes_submission(ack, body, client):
     )
 
 
-# The jig. A lane sometimes needs another one part way through: maybe the first
-# turned out wrong and was swapped, maybe two sizes are genuinely needed
-# together. Either way the earlier jig really was used, so this ADDS a record
-# next to it - it never overwrites one. Typing mistakes are fixed through Edit
-# instead, which changes the value it names.
-#
-# It lives on every working card because the jig is normally established during
-# the setup, which is after the job was logged and can be well after the
-# sheeting started.
-
 # ---------------------------------------------------------------------------
 # Jig and template
 # ---------------------------------------------------------------------------
-# A phase records any number of jigs, in the order they were used. Adding
-# appends, because a jig that was genuinely used stays on the record; a
-# typing mistake is corrected through Edit instead.
+# A lane records any number of jigs, in the order they were used, because a
+# lane sometimes needs another part way through - a jig swapped for a better
+# one, or two sizes genuinely used together. So the button has to serve two
+# different intentions, and it asks which: CORRECT the value that is there
+# (the usual reason for opening it twice - a mistyped size) or ADD one beside
+# it. A correction replaces the existing record; an addition leaves it, because
+# a jig that was genuinely used stays on the record.
+#
+# The button is on every working card because the jig is normally established
+# during the setup, which is after the job was logged and can be well after
+# the sheeting started.
 
 @app.action("trk_add_jig")
 def handle_add_jig(ack, body, client):
