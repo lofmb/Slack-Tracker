@@ -2945,7 +2945,7 @@ def handle_job_search_typing(ack, body, client):
         return
     action_id = ((body.get("actions") or [{}])[0]).get("action_id") or ""
     values = _current_form_values(view)
-    field = "invoice" if action_id.endswith("invoice_num") else "customer"
+    field = "invoice" if action_id == "trk_invoice_num" else "customer"
     typed = (values.get(field) or "").strip()
     matches = database.job_board_search(typed) if len(typed) >= 3 else []
 
@@ -4220,7 +4220,7 @@ def handle_edit(ack, body, client):
                     "label": {"type": "plain_text", "text": "Invoice / Pro Forma number"},
                     "element": {
                         "type": "plain_text_input",
-                        "action_id": "invoice_num",
+                        "action_id": "trk_invoice_num",
                         "initial_value": task["invoice_number"]
                     }
                 },
@@ -4299,7 +4299,7 @@ def handle_edit_submission(ack, body, client):
 
     # Collect updated values
     customer_name = vals["customer_block"]["trk_customer_name"]["value"]
-    invoice_number = vals["invoice_block"]["invoice_num"]["value"]
+    invoice_number = vals["invoice_block"]["trk_invoice_num"]["value"]
     # Blank comes back as nothing, which is what a job with no description is.
     # An assembler who clears the box has cleared it; LMSA keeps whatever the
     # row holds only when the key is absent altogether, which is how a form
