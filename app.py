@@ -1215,7 +1215,7 @@ def finished_card(task, user_id=None):
     return "T-%s is finished." % task["task_id"], blocks
 
 
-def _headline(task):
+def _headline(task, linear=False):
     """
     The one thing the card is about: the work that is being timed right now.
 
@@ -1227,6 +1227,18 @@ def _headline(task):
     """
     here = task.get("working_on")
     if not here:
+        # NOTHING RUNNING IS TWO DIFFERENT SITUATIONS, and calling both of them
+        # "Paused" was wrong about one of them. A job whose every lane is done
+        # is not paused - nobody stopped it, there is nothing left to come back
+        # to, and the only thing it can do now is close. Telling an assembler
+        # their finished job is paused invites them to look for a Resume that
+        # does not exist.
+        #
+        # The legacy card keeps the old words. It is a frozen renderer and a
+        # multi-part job still gets it; correcting its wording would be a
+        # change to something nobody asked to change.
+        if linear and job_is_finishable(task) and task.get("current_phase") != "completed":
+            return MARK_FINISHED + "  Ready to finish"
         return MARK_PAUSED + "  Paused - nothing is being timed"
     cutting = task.get("cutting_now")
     if cutting:
@@ -1239,7 +1251,7 @@ def _headline(task):
     return MARK_RUNNING + "  " + named + " - running"
 
 
-def _facts_line(task):
+def _facts_line(task, linear=False):
     """
     One grey line under the heading, or nothing at all.
 
@@ -1263,6 +1275,14 @@ def _facts_line(task):
         else:
             name = work_name(last["phase"], last["activity"], part_label(task, last.get("part")))
             recorded = work_elapsed(task, last.get("part"), last["phase"], last["activity"])
+        # "Last on packing" belongs under Paused, where it says where to come
+        # back to. Under Ready to finish there is nowhere to come back to, so
+        # the line says what is true instead: all the work is done. No figure
+        # follows it, because the only figure that means anything at this point
+        # is the job's total, and that is what the finished card is for - a
+        # lane's figure printed here would read as the total and be wrong.
+        if linear and job_is_finishable(task) and task.get("current_phase") != "completed":
+            return "All work complete"
         line = "Last on " + lower_name(name)
         # A figure of nought says less than no figure: it reads as a timer that
         # did not work, when the assembler simply moved on within the second.
@@ -2085,10 +2105,10 @@ def linear_card(task, note=None, expanded=False):
     task_id = task["task_id"]
     blocks = [{
         "type": "header",
-        "text": {"type": "plain_text", "text": _headline(task), "emoji": True},
+        "text": {"type": "plain_text", "text": _headline(task, linear=True), "emoji": True},
     }]
 
-    facts = _facts_line(task)
+    facts = _facts_line(task, linear=True)
     if facts:
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": facts}]})
 
