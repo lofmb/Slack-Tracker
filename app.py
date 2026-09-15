@@ -3358,6 +3358,11 @@ def handle_start_packing(ack, body, client):
 # ask to go. The job's Finish carries only the job and appears once nothing
 # anywhere on it is unfinished; that one opens the closing notes.
 
+def _completed_as(outcome):
+    """complete_task says "completed"; advance_work says "advanced". One word here."""
+    return "advanced" if outcome == "completed" else outcome
+
+
 @app.action("trk_complete_task")
 def handle_complete(ack, body, client):
     """Finish one lane, or - when the job is done - open the closing notes."""
@@ -3399,9 +3404,19 @@ def handle_complete(ack, body, client):
     # from its field straight to packing, and nothing outside this file knows
     # that. None means this was the last lane, and the job then waits on the
     # one press that ends it.
-    following = _stage_after(linear_stages(task), phase, "production")
+    #
+    # ONLY ON A JOB THAT HAS A ROUTE. A job drawn as several parts does not:
+    # its card offers Part 2's field beside Part 1's border because the
+    # assembler genuinely chooses between them, and there is no "next" to hand
+    # the clock to. Handing off there sent a three-part job to PACKING the
+    # moment Part 1's border was finished, with two parts still to make. So the
+    # multi-part card keeps exactly the behaviour it had: finish the lane, and
+    # let the assembler say what they are doing next.
+    linear = (task.get("part_count") or 1) <= 1
+    following = _stage_after(linear_stages(task), phase, "production") if linear else None
 
-    outcome = database.advance_work(task_id, phase, part, following)
+    outcome = (database.advance_work(task_id, phase, part, following) if linear
+               else _completed_as(database.complete_task(task_id, phase=phase, part=part)))
     if outcome != "advanced":
         client.chat_postEphemeral(
             channel=channel_id,
@@ -3637,8 +3652,15 @@ def handle_add_jig_submission(ack, body, client):
     if task is None:
         return
 
+    # CORRECTING ONLY WHEN IT WAS ACTUALLY CHOSEN. A form that never offered the
+    # choice cannot have expressed it - a card posted before this existed, or a
+    # submission from anything but the modal above - and defaulting such a
+    # submission to "correct" would silently overwrite a value nobody asked to
+    # change. Absence of the control means the behaviour that came before it.
+    # The modal itself pre-selects correcting, so an assembler still gets it by
+    # default where the default is an actual choice.
     how = ((vals.get("how_block", {}).get("how", {}) or {}).get("selected_option") or {}).get("value")
-    if jig_id and how != "add":
+    if jig_id and how == "correct":
         database.correct_jig(task_id, jig_id, jig_size)
         note = "*Jig corrected: %s*" % jig_size
     else:
