@@ -2888,7 +2888,12 @@ def handle_start(ack, body, client):
         return
 
     task = database.get_task(task_id)
-    if activity == "setup" and lane_needs_details(task, part, phase):
+    # WHATEVER the activity. The multi-part card offers a lane directly at its
+    # sheeting - "Part 1 Border" is one press - so guarding this on setup left
+    # those lanes never asked what they were, and they carried no design or
+    # difficulty at all. A lane that has not been described is asked about
+    # however it was entered.
+    if lane_needs_details(task, part, phase):
         client.views_open(
             trigger_id=body["trigger_id"],
             view=lane_details_view(task, part, phase, activity, channel_id),
