@@ -23,6 +23,7 @@ file; the sections below say where each part of the conversation lives.
 """
 
 import os
+import re
 import json
 import datetime
 import openpyxl
@@ -627,7 +628,7 @@ def header_text(task, suffix=""):
     """
     prefix = "T-" + str(task["task_id"]) + "  "
     room = HEADER_LIMIT - len(prefix) - len(suffix)
-    name = task["customer_name"] or ""
+    name = task["trk_customer_name"] or ""
     if len(name) > room:
         name = name[: max(room - 1, 0)].rstrip() + "…"
     return prefix + name + suffix
@@ -1356,7 +1357,7 @@ def _foot_lines(task):
     here = task.get("working_on") or {}
     first = "  ·  ".join(str(bit) for bit in (
         "T-" + str(task["task_id"]),
-        task["customer_name"],
+        task["trk_customer_name"],
         task["task_description"],
     ) if bit)
 
@@ -2269,7 +2270,7 @@ def busy_elsewhere_text(active):
     if active:
         return (
             "You're already working on T-" + str(active["task_id"]) + " "
-            + active["customer_name"] + ". Pause that job before starting this one."
+            + active["trk_customer_name"] + ". Pause that job before starting this one."
         )
     return "You're already working on another job. Pause that one before starting this."
 
@@ -2544,7 +2545,7 @@ def handle_export(body, client):
 
         ws.append([
             f"T-{task['task_id']}",
-            task["customer_name"],
+            task["trk_customer_name"],
             task["invoice_number"],
             task["task_description"],
             due_date_display(task),
@@ -2669,9 +2670,19 @@ def new_job_view(channel_id):
                 "type": "input",
                 "block_id": "customer_block",
                 "label": {"type": "plain_text", "text": "Customer name"},
+                # It stays an ordinary box. Slack has no field that both offers
+                # a list and accepts anything typed, and accepting anything is
+                # the half that matters: most quick jobs are not on the board
+                # yet, and the assembler must never be stuck because of that.
+                # So the box reports what is being typed and the matches are
+                # drawn under it - suggestions, not a second question.
+                "dispatch_action": True,
                 "element": {
                     "type": "plain_text_input",
-                    "action_id": "customer_name",
+                    "action_id": "trk_customer_name",
+                    "dispatch_action_config": {
+                        "trigger_actions_on": ["on_character_entered"],
+                    },
                 },
             },
             {
@@ -2822,6 +2833,129 @@ def handle_job_lookup(ack, body, client):
         print("[tracker] could not prefill from the job board: %s" % err, flush=True)
 
 
+# Redrawing the New Job form without losing what has been typed.
+#
+# views.update replaces the whole view, so anything already in a box has to be
+# put back deliberately - Slack does not carry it across. Everything typed so
+# far is read out of the view's own state and set as each field's initial
+# value, which is what makes a redraw invisible to the assembler.
+SUGGESTION_BLOCK = "job_board_suggestions"
+
+
+def _current_form_values(view):
+    state = ((view or {}).get("state") or {}).get("values") or {}
+
+    def typed(block, action):
+        return ((state.get(block) or {}).get(action) or {}).get("value") or ""
+
+    chosen = ((state.get("work_block") or {}).get("work") or {}).get("selected_option")
+    return {
+        "customer": typed("customer_block", "trk_customer_name"),
+        "invoice": typed("invoice_block", "invoice_num"),
+        "due_date": typed("date_block", "due_date"),
+        "work": (chosen or {}).get("value"),
+    }
+
+
+def _rebuilt_new_job(view, values, suggestions=None):
+    """The same form, with what is on screen kept and any matches drawn in."""
+    channel_id, _ = _new_job_metadata(view.get("private_metadata"))
+    rebuilt = new_job_view(channel_id)
+    blocks = []
+    for block in rebuilt["blocks"]:
+        block_id = block.get("block_id")
+        if block_id == "customer_block" and values.get("customer"):
+            block["element"]["initial_value"] = values["customer"]
+        elif block_id == "invoice_block" and values.get("invoice"):
+            block["element"]["initial_value"] = values["invoice"]
+        elif block_id == "date_block" and values.get("due_date"):
+            block["element"]["initial_value"] = values["due_date"]
+        elif block_id == "work_block" and values.get("work"):
+            for option in block["element"]["options"]:
+                if option["value"] == values["work"]:
+                    block["element"]["initial_option"] = option
+        blocks.append(block)
+        # The matches sit directly under the box they came from, and only while
+        # there are any. Nothing is left behind once one is taken.
+        if block_id == "customer_block" and suggestions:
+            blocks.append({
+                "type": "actions",
+                "block_id": SUGGESTION_BLOCK,
+                "elements": [
+                    {
+                        "type": "button",
+                        "action_id": "trk_pick_job_%d" % index,
+                        "text": {"type": "plain_text",
+                                 "text": ("%s  ·  INV %s" % (job["customer"], job["invoiceNo"]))[:75]},
+                        "value": job["invoiceNo"],
+                    }
+                    for index, job in enumerate(suggestions[:5])
+                ],
+            })
+    rebuilt["blocks"] = blocks
+    rebuilt["private_metadata"] = view.get("private_metadata") or ""
+    return rebuilt
+
+
+@app.action(re.compile(r"^trk_customer_name$"))
+def handle_customer_typing(ack, body, client):
+    """
+    Offer the open Job Board jobs that match what is being typed.
+
+    Only from three characters - below that almost everything matches, which is
+    a list nobody reads - and only when the set of matches actually changes,
+    because every redraw is a views.update and Slack counts them.
+    """
+    ack()
+    view = body.get("view") or {}
+    if not view.get("id"):
+        return
+    values = _current_form_values(view)
+    typed = (values.get("customer") or "").strip()
+    matches = database.job_board_search(typed) if len(typed) >= 3 else []
+
+    shown = []
+    for block in view.get("blocks") or []:
+        if block.get("block_id") == SUGGESTION_BLOCK:
+            shown = [e.get("value") for e in block.get("elements") or []]
+    if [m["invoiceNo"] for m in matches] == shown:
+        return  # the same matches are already on screen
+
+    try:
+        client.views_update(view_id=view["id"], view=_rebuilt_new_job(view, values, matches))
+    except Exception as err:  # noqa: BLE001
+        print("[tracker] could not draw the job board suggestions: %s" % err, flush=True)
+
+
+@app.action(re.compile(r"^trk_pick_job_\d+$"))
+def handle_pick_job(ack, body, client):
+    """
+    Fill the form from the Job Board row the assembler pointed at.
+
+    Only what that row actually carries. Its designs are read and reported, but
+    the job's shape is NOT inferred from them: a blank border column means
+    David has not filled it in, which is not the same as the job having no
+    border, and there is no column on the sheet that says which it is.
+    """
+    ack()
+    view = body.get("view") or {}
+    invoice_no = ((body.get("actions") or [{}])[0]).get("value")
+    if not view.get("id") or not invoice_no:
+        return
+    row = database.job_board_open_job(invoice_no)
+    if not row:
+        return
+    values = _current_form_values(view)
+    values["customer"] = row.get("customer") or values.get("customer")
+    values["invoice"] = row.get("invoiceNo") or values.get("invoice")
+    if row.get("dueDate"):
+        values["due_date"] = row["dueDate"]
+    try:
+        client.views_update(view_id=view["id"], view=_rebuilt_new_job(view, values, None))
+    except Exception as err:  # noqa: BLE001
+        print("[tracker] could not fill the form from the job board: %s" % err, flush=True)
+
+
 @app.view("trk_new_job")
 def handle_new_job(ack, body, client):
     """
@@ -2835,7 +2969,7 @@ def handle_new_job(ack, body, client):
     # end, and that is on the job itself.
     team_channel_id, _ = _new_job_metadata(body["view"].get("private_metadata"))
 
-    customer_name = _typed(vals, "customer_block", "customer_name")
+    customer_name = _typed(vals, "customer_block", "trk_customer_name")
     invoice_number = _typed(vals, "invoice_block", "invoice_num")
 
     # An empty box is carried as nothing at all, not as the word "N/A". Nobody
@@ -3701,7 +3835,7 @@ def _job_board_payload(task, user_id):
     """Everything the Job Board write needs, from the finished job."""
     packing_seconds = work_elapsed(task, None, "packing", "production") or 0
     return {
-        "customer": task.get("customer_name") or "",
+        "customer": task.get("trk_customer_name") or "",
         "enteredNumber": str(task.get("invoice_number") or "").strip(),
         "assembledBy": task.get("assembled_by") or user_id,
         "field": _lane_payload(task, "field_sheeting"),
@@ -4034,8 +4168,8 @@ def handle_edit(ack, body, client):
                     "label": {"type": "plain_text", "text": "Customer name"},
                     "element": {
                         "type": "plain_text_input",
-                        "action_id": "customer_name",
-                        "initial_value": task["customer_name"]
+                        "action_id": "trk_customer_name",
+                        "initial_value": task["trk_customer_name"]
                     }
                 },
                 {
@@ -4122,7 +4256,7 @@ def handle_edit_submission(ack, body, client):
     channel_id = metadata["channel_id"]
 
     # Collect updated values
-    customer_name = vals["customer_block"]["customer_name"]["value"]
+    customer_name = vals["customer_block"]["trk_customer_name"]["value"]
     invoice_number = vals["invoice_block"]["invoice_num"]["value"]
     # Blank comes back as nothing, which is what a job with no description is.
     # An assembler who clears the box has cleared it; LMSA keeps whatever the

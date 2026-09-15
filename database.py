@@ -1612,3 +1612,12 @@ def job_board_finish(payload):
     except Exception as err:  # noqa: BLE001
         print("[tracker] job board write failed: %s" % err, flush=True)
         return None
+
+
+def job_board_search(query):
+    """Open Current jobs matching what has been typed. Never opens the workbook."""
+    try:
+        body = _call("GET", "/job-board/search?q=%s" % urllib.parse.quote(str(query)))
+        return (body or {}).get("jobs") or []
+    except Exception:  # noqa: BLE001
+        return []
