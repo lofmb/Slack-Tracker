@@ -3253,12 +3253,21 @@ def resume_due_jobs(client):
             continue
 
         channel_id = task.get("dm_channel_id")
-        target = resume_target(task)
-        if target is None:
-            database.clear_auto_resume(task_id)
-            done.append((task_id, "nothing to resume"))
-            continue
-        part, phase, activity = target
+        # THE SAME PRECEDENCE THE CARD'S OWN FORWARD PRESS USES, and it has to
+        # be: the job's opening setup belongs to the job rather than to a lane,
+        # so resume_target does not answer for it and never has. Reading only
+        # resume_target here sent a job paused during its opening setup back at
+        # the FIRST LANE's setup instead - different work from the work they
+        # stopped, started without them, and recorded against the wrong thing.
+        if initial_setup_resumable(task):
+            part, phase, activity = None, "job_setup", "setup"
+        else:
+            target = resume_target(task)
+            if target is None:
+                database.clear_auto_resume(task_id)
+                done.append((task_id, "nothing to resume"))
+                continue
+            part, phase, activity = target
 
         busy = database.get_active_task(task["user_id"])
         if busy is not None:
