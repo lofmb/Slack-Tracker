@@ -1678,20 +1678,23 @@ def linear_forward(task):
 
 def _linear_jig_button(task):
     """
-    The jig, as the linear card words it: "Add a Jig", always.
+    The jig, as the linear card words it: "Jig", always.
 
-    The old card said "Set jig / template" the first time and "Add jig" after
-    that, which asked the assembler to read a distinction that only exists
-    inside the database - the record is appended either way. One label is the
-    truthful one, and it is the same label whether the lane holds no jig, one,
-    or several. The legacy card keeps its own wording: changing that would
-    alter a renderer that is deliberately frozen.
+    ONE WORD, because the button opens the same place whatever the lane holds.
+    "Add a Jig" was a promise about what would happen next, and it was the
+    wrong promise half the time: an assembler who had typed 49.9 by mistake
+    pressed it wanting to FIX that, and adding a second jig beside the wrong
+    one is not fixing it. What opens now shows what is recorded and lets them
+    correct it, or add another when another was genuinely used.
+
+    The legacy card keeps its own wording: changing that would alter a renderer
+    that is deliberately frozen.
     """
     here = task.get("working_on") or {}
     if here.get("phase") not in ("field_sheeting", "border_sheeting"):
         return None
     return _button(
-        "Add a Jig", "trk_add_jig",
+        "Jig", "trk_add_jig",
         work_value(task["task_id"], here.get("part"), here["phase"], "production"),
     )
 
@@ -1713,9 +1716,9 @@ def linear_secondary(task):
     no others, because in every other state everything it could open is either
     impossible or housekeeping nobody at a bench is reaching for:
 
-        lane setup running    Add a Jig, Edit details, Cancel job
-        lane sheeting running Start cutting, Add a Jig
-        cutting running       Add a Jig
+        lane setup running    Jig, Edit details, Cancel job
+        lane sheeting running Start cutting, Jig
+        cutting running       Jig
 
         opening setup         nothing
         packing               nothing applies
@@ -2170,40 +2173,14 @@ def update_card(client, task, channel_id, note=None, expanded=False):
     )
 
 
-def my_jobs_blocks(jobs):
-    """
-    Every unfinished job this assembler holds, and a way back into each.
-
-    An assembler can hold several jobs at once: one being timed, the rest
-    paused with everything they have recorded. Each keeps its own card in the
-    DM, which was the whole answer until the DM had a week of cards in it -
-    and then "where is T-42?" meant scrolling, which is not an answer.
-
-    So this is the list. One line per job saying what it is and what it is on,
-    and a press that brings that job's card back to the bottom of the DM where
-    the assembler is already looking. It creates nothing, changes nothing and
-    times nothing.
-    """
-    blocks = [{
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": "*Your unfinished jobs*"},
-    }]
-    for task in jobs:
-        lines = ["*T-%s*  %s" % (task["task_id"], task.get("customer_name") or "")]
-        lines.append(_headline(task))
-        facts = _facts_line(task)
-        if facts:
-            lines.append(facts)
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "\n".join(lines)},
-            "accessory": _button("Open this job", "trk_open_card",
-                                 work_value(task["task_id"])),
-        })
-    return blocks
-
-
-NO_OPEN_JOBS = ("You have no unfinished jobs. `/track` starts a new one.")
+# One command in this version, and a near miss is answered rather than guessed
+# at. Listing the jobs an assembler holds, looking one up, and browsing history
+# are all real needs and all deliberately absent here: they are their own
+# design, not something to grow sideways out of the command that makes a job.
+UNKNOWN_SUBCOMMAND = (
+    "This version of the tracker uses `/track` on its own, with nothing after it. "
+    "Send `/track` to start a new job."
+)
 
 
 def repost_card(client, task, channel_id, note=None):
@@ -2402,11 +2379,16 @@ def track_command(ack, body, client):
         handle_export(body,client)
         return
 
-    # The way back to a job that has scrolled out of sight. It reads; it never
-    # starts anything, so it is answered before the one-timer check below -
-    # asking which jobs you hold is not a press on any of them.
-    if subcommand in ("jobs", "my jobs", "list"):
-        handle_my_jobs(body, client)
+    # ANYTHING ELSE IS REFUSED, RATHER THAN TREATED AS NOTHING. "/track job" is
+    # one letter away from "/track jobs" and both used to open the New Job form
+    # in silence, so a typo created a job. This version has one command, and a
+    # near miss is told so instead of being guessed at.
+    if subcommand:
+        client.chat_postEphemeral(
+            channel=body["channel_id"],
+            user=user_id,
+            text=UNKNOWN_SUBCOMMAND,
+        )
         return
 
     # One timer at a time per person. An assembler may hold several unfinished
@@ -2425,50 +2407,6 @@ def track_command(ack, body, client):
     # The New Job form. private_metadata carries the channel the command came
     # from, so the job can be announced back to the same room.
     client.views_open(trigger_id=body["trigger_id"], view=new_job_view(body["channel_id"]))
-
-def handle_my_jobs(body, client):
-    """`/track jobs` - the assembler's own unfinished list, privately."""
-    user_id = body["user_id"]
-    jobs = database.get_open_tasks(user_id)
-    if not jobs:
-        client.chat_postEphemeral(channel=body["channel_id"], user=user_id,
-                                  text=NO_OPEN_JOBS)
-        return
-    client.chat_postEphemeral(
-        channel=body["channel_id"],
-        user=user_id,
-        text="You have %d unfinished job%s." % (len(jobs), "" if len(jobs) == 1 else "s"),
-        blocks=my_jobs_blocks(jobs),
-    )
-
-
-@app.action("trk_open_card")
-def handle_open_card(ack, body, client):
-    """
-    Bring one job's card back to the bottom of the assembler's DM.
-
-    Nothing is started and nothing is timed: the card is redrawn where they
-    can see it, which is what the press says it does. The job's own DM is
-    where it goes, whichever channel the list was read in.
-    """
-    ack()
-    task_id = read_work_value(body["actions"][0]["value"])[0]
-    user_id = body["user"]["id"]
-    channel_id = body["container"]["channel_id"]
-
-    task = resolve_job(client, body, task_id, user_id, channel_id)
-    if task is None:
-        return
-
-    dm = task.get("dm_channel_id")
-    if not dm:
-        client.chat_postEphemeral(
-            channel=channel_id, user=user_id,
-            text="T-%s has no card to bring back yet." % task_id,
-        )
-        return
-    repost_card(client, task, dm)
-
 
 # ---------------------------------------------------------------------------
 # The spreadsheet export
@@ -2977,7 +2915,7 @@ def lane_details_view(task, part, phase, activity, channel_id):
     the hint says plainly where to add one later.
 
     Leaving it blank costs nothing. Filling it records the same jig the card's
-    Add a Jig records, by the same call, which APPENDS - so a lane can carry
+    the card's Jig records, by the same call, which APPENDS - so a lane can carry
     several, and one entered here is never overwritten by one added later.
 
     Saving starts the work the assembler pressed for. That is the whole point of
@@ -3051,7 +2989,7 @@ def lane_details_view(task, part, phase, activity, channel_id):
                 # assembler has when they cannot fill it in yet.
                 "hint": {"type": "plain_text",
                          "text": "If you don't know the jig yet, leave this blank - "
-                                 "you can add one later from More."},
+                                 "you can add one from More later."},
             },
         ],
     }
@@ -3094,7 +3032,7 @@ def handle_lane_details(ack, body, client):
         task_id, meta["phase"], design, difficulty, part=meta["part"],
     )
 
-    # A jig, only if they knew it. The SAME call the card's Add a Jig makes, so
+    # A jig, only if they knew it. The SAME call the card's Jig button makes, so
     # one entered here and one added later sit side by side on the lane rather
     # than replacing each other - which is the truth, because both were used.
     jig = (_typed(vals, "jig_block", "val") or "").strip()
@@ -3586,9 +3524,58 @@ def handle_add_jig(ack, body, client):
     lane_phrase = ("the %s lane" % lane_word) if numbered is None \
         else ("Part %s's %s lane" % (numbered, lane_word))
 
-    already = (lane_of(task, part, phase) or {}).get("jigs")
-    jig_blocks = [
-        {
+    lane = lane_of(task, part, phase) or {}
+    records = lane.get("jig_records") or []
+    current = records[-1] if records else None
+
+    # WHAT IS RECORDED, FIRST. An assembler pressing Jig usually knows what the
+    # lane should say; what they do not know is what it currently says. So the
+    # form opens with the answer already in the box, ready to be corrected -
+    # because the common reason for pressing this a second time is a typo, and
+    # appending 49.6 underneath a wrong 49.9 does not fix a wrong 49.9.
+    jig_blocks = []
+    if current:
+        said = " · ".join(r["value"] for r in records)
+        jig_blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": "*Recorded on %s:*  %s" % (lane_phrase, said)},
+        })
+        jig_blocks.append({
+            "type": "input",
+            "block_id": "jig_block",
+            "label": {"type": "plain_text", "text": "Jig or template"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "jig_size",
+                "initial_value": current["value"],
+            },
+        })
+        jig_blocks.append({
+            "type": "input",
+            "block_id": "how_block",
+            "label": {"type": "plain_text", "text": "What is this?"},
+            "element": {
+                "type": "radio_buttons",
+                "action_id": "how",
+                "options": [
+                    {"text": {"type": "plain_text",
+                              "text": "A correction - %s was wrong" % current["value"]},
+                     "value": "correct"},
+                    {"text": {"type": "plain_text",
+                              "text": "Another jig, genuinely used as well"},
+                     "value": "add"},
+                ],
+                # Correcting is the common case and the safe one: it changes a
+                # value the assembler is looking at, and the old one is kept in
+                # the record either way.
+                "initial_option": {"text": {"type": "plain_text",
+                                            "text": "A correction - %s was wrong" % current["value"]},
+                                   "value": "correct"},
+            },
+        })
+    else:
+        jig_blocks.append({
             "type": "input",
             "block_id": "jig_block",
             "label": {"type": "plain_text", "text": "Jig or template used on " + lane_phrase},
@@ -3598,17 +3585,6 @@ def handle_add_jig(ack, body, client):
                 "placeholder": {"type": "plain_text",
                                 "text": "e.g. 49.6, 49.4/49.8, or template"},
             },
-        },
-    ]
-    if already:
-        # Only where it is actually true. On a lane with nothing recorded this
-        # sentence would be answering a question nobody asked.
-        jig_blocks.append({
-            "type": "context",
-            "elements": [{
-                "type": "mrkdwn",
-                "text": "This is added to the lane. Anything already recorded on it stays as it is.",
-            }],
         })
 
     client.views_open(
@@ -3616,7 +3592,7 @@ def handle_add_jig(ack, body, client):
         view={
             "type": "modal",
             "callback_id": "trk_add_jig_modal",
-            "title": {"type": "plain_text", "text": "Add a Jig"},
+            "title": {"type": "plain_text", "text": "Jig"},
             "submit": {"type": "plain_text", "text": "Save"},
             "close": {"type": "plain_text", "text": "Cancel"},
             "private_metadata": json.dumps({
@@ -3624,6 +3600,7 @@ def handle_add_jig(ack, body, client):
                 "channel_id": channel_id,
                 "part": part,
                 "phase": phase,
+                "jig_id": current["id"] if current else None,
             }),
             "blocks": jig_blocks,
         },
@@ -3632,41 +3609,44 @@ def handle_add_jig(ack, body, client):
 
 @app.view("trk_add_jig_modal")
 def handle_add_jig_submission(ack, body, client):
+    """
+    Save the jig - as a correction to the one recorded, or as another one.
+
+    A CORRECTION CHANGES THE VALUE; it does not leave the wrong one standing
+    beside the right one. LMSA keeps what it used to say in the audit trail, so
+    nothing is lost by fixing a typo, and the lane reads as one jig because one
+    jig is what was used.
+
+    Adding is still there, and still means what it says: a second jig that was
+    genuinely used as well, which happens when one is swapped part way through
+    or two sizes are needed together.
+    """
     ack()
     user_id = body["user"]["id"]
     vals = body["view"]["state"]["values"]
     metadata = json.loads(body["view"]["private_metadata"])
     task_id = metadata["task_id"]
     channel_id = metadata["channel_id"]
+    jig_id = metadata.get("jig_id")
 
     jig_size = (vals["jig_block"]["jig_size"]["value"] or "").strip()
     if not jig_size:
         return
 
-    database.add_jig(task_id, metadata.get("phase") or "field_sheeting", jig_size,
-                     part=metadata.get("part"))
-    task = database.get_task(task_id)
-
-    # The job can disappear between opening the modal and submitting it -
-    # deleted, or finished. Tell the assembler instead of closing the modal in
-    # silence with their jig unrecorded, and leave the final card alone.
-    if task is None or task["current_phase"] == "completed":
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text=f"'{jig_size}' was not recorded - that job is no longer open."
-        )
+    task = resolve_job(client, body, task_id, user_id, channel_id)
+    if task is None:
         return
 
-    update_card(client, task, channel_id, note=f"*Jig recorded: {jig_size}*")
+    how = ((vals.get("how_block", {}).get("how", {}) or {}).get("selected_option") or {}).get("value")
+    if jig_id and how != "add":
+        database.correct_jig(task_id, jig_id, jig_size)
+        note = "*Jig corrected: %s*" % jig_size
+    else:
+        database.add_jig(task_id, metadata["phase"], jig_size, part=metadata["part"])
+        note = "*Jig recorded: %s*" % jig_size
 
+    update_card(client, database.get_task(task_id), channel_id, note=note)
 
-#Delete Button
-# ---------------------------------------------------------------------------
-# Corrections: editing a job, and cancelling one
-# ---------------------------------------------------------------------------
-# Editing changes the values a job was given. Cancelling keeps the job and
-# everything recorded on it - nothing is ever deleted outright.
 
 @app.action("trk_delete_task")
 def handle_delete(ack, body, client):
