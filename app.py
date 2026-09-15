@@ -24,6 +24,7 @@ file; the sections below say where each part of the conversation lives.
 
 import os
 import re
+import time
 import json
 import datetime
 import openpyxl
@@ -2846,7 +2847,7 @@ def _current_form_values(view):
     state = ((view or {}).get("state") or {}).get("values") or {}
 
     def typed(block, action):
-        return ((state.get(block) or {}).get(action) or {}).get("value") or ""
+        return _block_value(state, block, action)
 
     chosen = ((state.get("work_block") or {}).get("work") or {}).get("selected_option")
     return {
@@ -2857,13 +2858,36 @@ def _current_form_values(view):
     }
 
 
-def _rebuilt_new_job(view, values, suggestions=None):
-    """The same form, with what is on screen kept and any matches drawn in."""
+def _block_value(vals, prefix, action):
+    """
+    A field's value, whichever generation of the block it is on.
+
+    The customer and invoice blocks are re-issued under a new id whenever a Job
+    Board job is picked, so the value is found by what the block IS rather than
+    by the exact id it happens to carry.
+    """
+    for block_id, actions in (vals or {}).items():
+        if block_id == prefix or block_id.startswith(prefix + "#"):
+            return ((actions or {}).get(action) or {}).get("value") or ""
+    return ""
+
+
+def _rebuilt_new_job(view, values, suggestions=None, replace=False):
+    """
+    The same form, with what is on screen kept and any matches drawn in.
+
+    `replace` re-issues the customer and invoice fields under new ids, which is
+    the only way to put a value into a box the assembler has already typed in:
+    Slack holds on to their text for any field whose id it recognises.
+    """
     channel_id, _ = _new_job_metadata(view.get("private_metadata"))
     rebuilt = new_job_view(channel_id)
+    generation = str(int(time.time() * 1000)) if replace else None
     blocks = []
     for block in rebuilt["blocks"]:
         block_id = block.get("block_id")
+        if replace and block_id in ("customer_block", "invoice_block"):
+            block["block_id"] = "%s#%s" % (block_id, generation)
         if block_id == "customer_block" and values.get("customer"):
             block["element"]["initial_value"] = values["customer"]
         elif block_id == "invoice_block" and values.get("invoice"):
@@ -2951,7 +2975,8 @@ def handle_pick_job(ack, body, client):
     if row.get("dueDate"):
         values["due_date"] = row["dueDate"]
     try:
-        client.views_update(view_id=view["id"], view=_rebuilt_new_job(view, values, None))
+        client.views_update(view_id=view["id"],
+                            view=_rebuilt_new_job(view, values, None, replace=True))
     except Exception as err:  # noqa: BLE001
         print("[tracker] could not fill the form from the job board: %s" % err, flush=True)
 
@@ -2969,8 +2994,8 @@ def handle_new_job(ack, body, client):
     # end, and that is on the job itself.
     team_channel_id, _ = _new_job_metadata(body["view"].get("private_metadata"))
 
-    customer_name = _typed(vals, "customer_block", "trk_customer_name")
-    invoice_number = _typed(vals, "invoice_block", "invoice_num")
+    customer_name = _block_value(vals, "customer_block", "trk_customer_name")
+    invoice_number = _block_value(vals, "invoice_block", "invoice_num")
 
     # An empty box is carried as nothing at all, not as the word "N/A". Nobody
     # has given this assembler a date yet; that is not a job with no deadline.
