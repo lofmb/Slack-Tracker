@@ -2337,6 +2337,29 @@ def refusal_text(reason, task, phase=None):
             "what this job is up to and what you can start."
         ),
         "job_not_open": "This job is no longer open, so nothing has been changed.",
+        # The handoff. Finishing a lane hands the clock straight to the next
+        # work, so these say what went wrong with WHERE IT WAS GOING - and they
+        # all end the same way, because the card the assembler is holding is
+        # about to be redrawn with whatever is actually true.
+        "next_phase_not_found": (
+            "The " + lane + " is finished, but the next step is not on this job. Your card "
+            "will show what is actually left."
+        ),
+        "next_phase_already_complete": (
+            "The " + lane + " is finished, and so is the step after it. Your card will show "
+            "what is actually left."
+        ),
+        "next_phase_already_skipped": (
+            "The " + lane + " is finished. The step after it is not on this job, so your card "
+            "will show what is."
+        ),
+        "next_part_not_found": (
+            "The " + lane + " is finished, but the part after it is not on this job. Your card "
+            "will show what is actually left."
+        ),
+        "next_is_the_same_lane": (
+            "Nothing to move on to - your card will show what this job is up to."
+        ),
     }
     return texts.get(reason, "That could not be done, so nothing has been changed.")
 
@@ -2911,13 +2934,12 @@ def handle_start(ack, body, client):
     if part is None and phase in ("field_sheeting", "border_sheeting"):
         part = task.get("current_part")
 
-    if lane_needs_details(task, part, phase):
-        client.views_open(
-            trigger_id=body["trigger_id"],
-            view=lane_details_view(task, part, phase, activity, channel_id),
-        )
-        return
-
+    # THE CLOCK STARTS FIRST, AND THEN THE FORM OPENS. It used to be the other
+    # way round, which meant an assembler who pressed Start and then spent a
+    # minute reading the drawing to answer "which design?" spent that minute
+    # untimed - and an assembler who closed the form had not started at all,
+    # despite having pressed Start. Finding and describing the lane IS the
+    # setup; it is the work, so it is timed as the work.
     outcome = database.start_work(task_id, phase, activity, part=part)
     if outcome != "started":
         client.chat_postEphemeral(
@@ -2927,7 +2949,14 @@ def handle_start(ack, body, client):
         )
         return
 
-    update_card(client, database.get_task(task_id), channel_id)
+    task = database.get_task(task_id)
+    if activity == "setup" and lane_needs_details(task, part, phase):
+        client.views_open(
+            trigger_id=body["trigger_id"],
+            view=lane_details_view(task, part, phase, activity, channel_id),
+        )
+
+    update_card(client, task, channel_id)
 
 
 def lane_details_view(task, part, phase, activity, channel_id):
@@ -3427,8 +3456,15 @@ def handle_complete(ack, body, client):
         )
         return
 
-    outcome = database.complete_task(task_id, phase=phase, part=part)
-    if outcome != "completed":
+    # WHAT FOLLOWS THIS LANE, decided here rather than by the database, because
+    # the route through a job is the card's business: a job with no border goes
+    # from its field straight to packing, and nothing outside this file knows
+    # that. None means this was the last lane, and the job then waits on the
+    # one press that ends it.
+    following = _stage_after(linear_stages(task), phase, "production")
+
+    outcome = database.advance_work(task_id, phase, part, following)
+    if outcome != "advanced":
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
@@ -3436,10 +3472,24 @@ def handle_complete(ack, body, client):
         )
         return
 
+    task = database.get_task(task_id)
+
+    # THE NEXT LANE'S SETUP IS ALREADY RUNNING BY NOW, so if it has never been
+    # described this form is the assembler recording what they are looking at -
+    # not a gate they must pass before the clock will start. Filling it in IS
+    # part of doing the setup, and it is timed as such.
+    if following is not None:
+        next_part, next_phase, next_activity = following
+        if next_activity == "setup" and lane_needs_details(task, next_part, next_phase):
+            client.views_open(
+                trigger_id=body["trigger_id"],
+                view=lane_details_view(task, next_part, next_phase, next_activity, channel_id),
+            )
+
     # The card, and nothing else. Finishing a lane is the assembler's business and
     # the channel does not hear about it; what comes next is on the card, which
-    # now offers whatever is still unfinished.
-    update_card(client, database.get_task(task_id), channel_id)
+    # now shows the work that has already begun.
+    update_card(client, task, channel_id)
 
 
 @app.view("trk_notes_modal")

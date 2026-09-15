@@ -997,6 +997,55 @@ def stop_cutting(task_id):
     return "stopped"
 
 
+def advance_work(task_id, phase, part, next_step):
+    """
+    Finish this lane and start the next work, without a gap between them.
+
+    NORMAL FORWARD MOVEMENT MUST NOT STOP THE CLOCK. Finishing the field
+    sheeting on a job that also has a border is not a break - it is the same
+    person, still at the bench, moving on. Doing it as two calls would leave a
+    window with nothing timed, and on a busy morning that window lasts as long
+    as it takes somebody to notice the card and press again.
+
+    `next_step` is (part, phase, activity), or None for the last lane before
+    the closing notes - which finishes and starts nothing, because there is
+    nothing left to do.
+
+    Returns "advanced", or the reason it could not. The refusals about the lane
+    being LEFT keep their old names, so a caller reads them exactly as before;
+    the ones about the lane being GONE TO are prefixed "next_", because the
+    same word for two different mistakes would leave a card unable to say which
+    happened.
+    """
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return None
+    view, row = resolved
+
+    payload = {
+        "phase": phase,
+        "partNumber": part if phase in ("field_sheeting", "border_sheeting") else None,
+        "actor": f"slack:{row['user_id']}",
+        "next": None,
+    }
+    if next_step is not None:
+        next_part, next_phase, next_activity = next_step
+        payload["next"] = {
+            "phase": next_phase,
+            "partNumber": next_part if next_phase in ("field_sheeting", "border_sheeting") else None,
+            "activity": next_activity or "production",
+        }
+
+    try:
+        _call("POST", f"/jobs/{view['job']['id']}/phases/advance", payload,
+              operation=f"advance_work_{phase}")
+    except TrackerRefused as refusal:
+        if refusal.reason in ("phase_already_complete", "already_processed"):
+            return "advanced"
+        return refusal.reason
+    return "advanced"
+
+
 def complete_task(task_id, phase=None, part=None):
     """
     Finish one lane, closing any timer still running on it.
