@@ -280,7 +280,14 @@ def _call(method, path, payload=None, operation=None):
     error = envelope.get("error")
     if error == "refused" or envelope.get("reason"):
         raise TrackerRefused(envelope.get("reason") or error, envelope.get("detail"))
-    raise TrackerApiError(f"tracker API error: {error} (HTTP {status})")
+    # The envelope's detail is the whole diagnostic value of a 400: without it
+    # a rejected field reads only as "bad_request", and the field that was
+    # actually wrong has to be guessed at.
+    detail = envelope.get("detail")
+    raise TrackerApiError(
+        "tracker API error: %s (HTTP %s)%s"
+        % (error, status, (" - %s" % json.dumps(detail)[:400]) if detail else "")
+    )
 
 
 # --- shape translation -----------------------------------------------------
