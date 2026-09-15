@@ -1847,7 +1847,8 @@ def pause_choice_view(task, channel_id):
     why that is the design rather than the shortfall.
     """
     here = task.get("working_on") or {}
-    doing = lower_name(_stage_name(here.get("phase"), here.get("activity")))         if here.get("phase") else "this job"
+    doing = (lower_name(_stage_name(here.get("phase"), here.get("activity")))
+             if here.get("phase") else "this job")
     options = [
         {"text": {"type": "plain_text", "text": label}, "value": value}
         for value, label in PAUSE_OPTIONS
@@ -1885,67 +1886,120 @@ def pause_choice_view(task, channel_id):
             },
             {
                 "type": "input",
-                "block_id": "minutes_block",
+                "block_id": "hours_block",
                 "optional": True,
-                "label": {"type": "plain_text", "text": "How many minutes?"},
+                "label": {"type": "plain_text", "text": "Hours"},
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "val",
-                    "placeholder": {"type": "plain_text", "text": "e.g. 45"},
+                    "placeholder": {"type": "plain_text", "text": "0"},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "minutes_block",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Minutes"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "val",
+                    "placeholder": {"type": "plain_text", "text": "45"},
                 },
                 "hint": {"type": "plain_text",
-                         "text": "Only if you chose a different length of time."},
+                         "text": "Only if you chose a different length of time. "
+                                 "Either box can be left blank."},
             },
         ],
     }
 
 
-def read_pause_minutes(choice, typed):
-    """
-    How many minutes the break is, or None for a pause with no time on it.
+def _whole_number(text, what):
+    """One box of the custom length, as a number. Returns (value, error)."""
+    text = (text or "").strip()
+    if not text:
+        return 0, None
+    # "2h" and "45m" are what somebody types when they are in a hurry, and
+    # refusing them would be pedantry about a box that knows what it is asking.
+    cleaned = text.rstrip("hm").strip()
+    if not cleaned.isdigit():
+        return None, "%s, as a number - 45, not \"about an hour\"." % what
+    return int(cleaned), None
 
-    Returns (minutes, error). The error is a sentence for the assembler, shown
-    against the box they typed in - never a silent fallback to some default,
-    because a number nobody chose is worse than being asked again.
+
+def duration_words(minutes):
+    """
+    A length of time as somebody says it out loud.
+
+    20 -> "20 minutes"; 45 -> "45 minutes"; 60 -> "1 hour";
+    105 -> "1 hour 45 minutes"; 120 -> "2 hours".
+
+    No "0 hours" and no "0 minutes": a part that is nought is a part nobody
+    would say, and printing it is how a sentence starts sounding like a form.
+    """
+    hours, mins = divmod(int(minutes), 60)
+    said = []
+    if hours:
+        said.append("%d hour%s" % (hours, "" if hours == 1 else "s"))
+    if mins:
+        said.append("%d minute%s" % (mins, "" if mins == 1 else "s"))
+    return " ".join(said) or "0 minutes"
+
+
+def read_pause_minutes(choice, typed_hours, typed_minutes=None):
+    """
+    How long the break is, in minutes, or None for a pause with no time on it.
+
+    Returns (minutes, error, which_box). The error is a sentence for the
+    assembler shown against the box they actually typed in - never a silent
+    fallback to some default, because a length nobody chose is worse than being
+    asked again.
+
+    The two preset lunches carry their own length. CUSTOM IS HOURS AND MINUTES,
+    because "1 hour 45 minutes" is how a break of that length gets described in
+    a workshop and "105" is not. Either box may be left blank and counts as
+    nought; both blank is the one thing that cannot be read.
     """
     if choice in PAUSE_MINUTES:
-        return PAUSE_MINUTES[choice], None
+        return PAUSE_MINUTES[choice], None, None
     if choice != "custom":
-        return None, None
-    text = (typed or "").strip()
-    if not text:
-        return None, "How many minutes?"
-    digits = text.rstrip("m").strip()
-    if not digits.isdigit():
-        return None, "Minutes, as a number - 45, not \"about an hour\"."
-    minutes = int(digits)
+        return None, None, None
+
+    hours, error = _whole_number(typed_hours, "Hours")
+    if error:
+        return None, error, "hours_block"
+    mins, error = _whole_number(typed_minutes, "Minutes")
+    if error:
+        return None, error, "minutes_block"
+
+    minutes = hours * 60 + mins
     if minutes < 1:
-        return None, "That is not a break. Pick one of the others."
+        return None, "How long are you away? Put a number in one of the boxes.", "minutes_block"
     if minutes > PAUSE_CUSTOM_MAX_MINUTES:
-        return None, ("Longer than %d minutes is going home - pause with no set "
-                      "time instead." % PAUSE_CUSTOM_MAX_MINUTES)
-    return minutes, None
+        return None, ("Longer than %s is going home - pause with no set time "
+                      "instead." % duration_words(PAUSE_CUSTOM_MAX_MINUTES)), "hours_block"
+    return minutes, None, None
 
 
 def pause_note(minutes):
     """
-    The grey line under the buttons while the job is paused.
+    The grey line under the buttons while the job is paused for a set time.
 
-    The time is a Slack date token, so it renders in the timezone of whoever is
-    READING the card rather than in whatever timezone this process happens to
-    run in. It is a fixed point, not a countdown - Slack does not tick, which
-    is the same reason the running card prints no durations.
+    It says the one thing the assembler needs to know and nothing else: the job
+    comes back on its own, and when. The length is worded the way somebody says
+    it out loud - "in 1 hour 45 minutes", not "in 105 minutes" - and the clock
+    time beside it is a Slack date token, so it reads in the timezone of
+    whoever is looking rather than the server's.
 
-    None for a pause with no time on it: the card already says it is paused,
-    and repeating that in grey underneath tells nobody anything.
+    None for a pause with no time on it. That one really does wait for a press,
+    and the card already says it is paused.
     """
     if not minutes:
         return None
-    back = datetime.datetime.now(datetime.timezone.utc)         + datetime.timedelta(minutes=minutes)
+    back = (datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(minutes=minutes))
     stamp = int(back.timestamp())
-    said = "in 1 hour" if minutes == 60 else "in %d minutes" % minutes
-    return "*Paused - back about <!date^%d^{time}|%s>.* Press Resume when you are."         % (stamp, said)
-
+    return ("*This job will automatically resume in %s* - at "
+            "<!date^%d^{time}|that time>." % (duration_words(minutes), stamp))
 
 def linear_actions(task, expanded=False):
     """
@@ -3146,9 +3200,11 @@ def handle_pause_submission(ack, body, client):
     meta = json.loads(body["view"]["private_metadata"])
 
     choice = (vals.get("break_block", {}).get("val", {}).get("selected_option") or {}).get("value")
-    minutes, error = read_pause_minutes(choice, _typed(vals, "minutes_block", "val"))
+    minutes, error, box = read_pause_minutes(
+        choice, _typed(vals, "hours_block", "val"), _typed(vals, "minutes_block", "val"),
+    )
     if error:
-        ack(response_action="errors", errors={"minutes_block": error})
+        ack(response_action="errors", errors={box: error})
         return
 
     ack()
@@ -3161,7 +3217,71 @@ def handle_pause_submission(ack, body, client):
         return
 
     database.stop_work(task_id)
+    # What was running, so the resume knows what to start again. Read BEFORE
+    # the stop would have been wrong - stop_work closes the segment, and the
+    # job's own record of "what were they last on" is what survives it.
+    if minutes:
+        database.set_auto_resume(task_id, minutes)
+    else:
+        database.clear_auto_resume(task_id)
     update_card(client, database.get_task(task_id), channel_id, note=pause_note(minutes))
+
+
+def resume_due_jobs(client):
+    """
+    Start again the jobs whose set-time pause has run out.
+
+    Called on a timer by the launcher, NOT by anything in this module - a
+    thread started at import would run inside every proof and every one-off
+    script that reads this file. The launcher lives outside the vendored tree
+    for exactly this kind of reason.
+
+    THE ONE-TIMER RULE IS NOT RELAXED FOR THIS. An assembler who is already
+    timing something else at the moment their lunch runs out is not moved off
+    it: the resume is dropped, the card says so in plain words, and the job
+    stays paused and theirs. Stealing them would be the tracker deciding which
+    job somebody is standing at, which is the one thing it must never do.
+
+    Returns a list of (task_id, outcome) for the launcher to log.
+    """
+    done = []
+    for task_id in database.get_due_resumes():
+        task = database.get_task(task_id)
+        if task is None:
+            database.clear_auto_resume(task_id)
+            done.append((task_id, "gone"))
+            continue
+
+        channel_id = task.get("dm_channel_id")
+        target = resume_target(task)
+        if target is None:
+            database.clear_auto_resume(task_id)
+            done.append((task_id, "nothing to resume"))
+            continue
+        part, phase, activity = target
+
+        busy = database.get_active_task(task["user_id"])
+        if busy is not None:
+            # They are at another job. Say so and leave both alone.
+            database.clear_auto_resume(task_id)
+            if channel_id:
+                update_card(client, task, channel_id, note=(
+                    "*This job did not resume on its own.* You were working on "
+                    "T-%s at the time, so it is still paused and waiting for you."
+                    % busy["task_id"]))
+            done.append((task_id, "busy on T-%s" % busy["task_id"]))
+            continue
+
+        outcome = database.start_work(task_id, phase, activity, part=part)
+        database.clear_auto_resume(task_id)
+        if outcome != "started":
+            done.append((task_id, "refused: %s" % outcome))
+            continue
+        if channel_id:
+            update_card(client, database.get_task(task_id), channel_id,
+                        note="*Resumed automatically - your set time is up.*")
+        done.append((task_id, "resumed"))
+    return done
 
 
 @app.action("trk_start_cutting")

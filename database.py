@@ -894,6 +894,12 @@ def start_work(task_id, phase=None, activity="production", part=None):
         if refusal.reason in ("already_running", "already_processed"):
             return "started"
         return refusal.reason
+
+    # WORK HAS STARTED, so there is nothing left for a timed pause to resume.
+    # Cleared here rather than at each of the buttons that start work, because
+    # every one of them would have to remember - and the one that forgot would
+    # leave a clock ticking towards an assembler who is already at the bench.
+    clear_auto_resume(task_id)
     return "started"
 
 
@@ -1233,6 +1239,59 @@ def get_phase_elapsed(task_id):
         "packing_elapsed": row["packing_elapsed"],
         "total_elapsed": row["total_elapsed"],
     }
+
+
+def set_auto_resume(task_id, minutes):
+    """
+    Remember that this pause ends by itself, and when.
+
+    Stored on the JOB rather than held in this process, because a pause outlives
+    a restart: the assembler is at lunch, and a deploy in the middle of it must
+    not quietly turn their timed break into an indefinite one. LMSA computes the
+    moment from the length, so the two sides cannot disagree about "now".
+    """
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return
+    view, row = resolved
+    _call("POST", f"/jobs/{view['job']['id']}/auto-resume", {
+        "minutes": int(minutes),
+        "actor": f"slack:{row['user_id']}",
+    }, operation="set_auto_resume")
+
+
+def clear_auto_resume(task_id):
+    """
+    This pause no longer ends by itself.
+
+    Called when the job is resumed by hand, when the automatic resume has
+    fired, and when it could not fire. Clearing is idempotent and a job with
+    nothing set is not an error - a plain Pause clears one that was never there
+    on every single press.
+    """
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return
+    view, row = resolved
+    try:
+        _call("DELETE", f"/jobs/{view['job']['id']}/auto-resume", {
+            "actor": f"slack:{row['user_id']}",
+        }, operation="clear_auto_resume")
+    except TrackerRefused as refusal:
+        if refusal.reason not in ("not_found", "already_processed"):
+            raise
+
+
+def get_due_resumes():
+    """
+    The job numbers whose set-time pause has run out, oldest first.
+
+    A read, and only a read: it never starts anything and never clears
+    anything, so a launcher that crashes between asking and acting leaves the
+    jobs exactly where they were and asks again next time round.
+    """
+    data = _call("GET", "/jobs/auto-resume/due") or {}
+    return [job["jobNumber"] for job in data.get("jobs") or []]
 
 
 def update_message_ts(task_id, dm_channel_id, message_ts):
