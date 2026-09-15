@@ -3909,11 +3909,16 @@ def _lane_payload(task, phase):
     difficulty = _as_number(lane.get("difficulty"))
     if difficulty is not None:
         payload["difficulty"] = difficulty
-    jigs = lane.get("jigs") or []
-    if jigs:
-        # The board has one jig cell per lane; the Tracker can hold several.
-        # The first is the one the lane was set up with.
-        payload["jigSize"] = str(jigs[0])
+    # From the RECORDS, never from lane["jigs"] - that is the card's display
+    # line, a string joined with " / ", and indexing it yields a character.
+    # "49.4/49.8" arrived at the board as "4".
+    #
+    # The board has one jig cell per lane; the Tracker can hold several. The
+    # first record is the one the lane was set up with.
+    records = lane.get("jig_records") or []
+    first = (records[0] or {}).get("value") if records else None
+    if first is not None and str(first).strip():
+        payload["jigSize"] = str(first).strip()
     total = (seconds + setup) / 3600.0
     if total:
         payload["totalHours"] = round(total, 3)
@@ -3930,7 +3935,10 @@ def _job_board_payload(task, user_id):
         "field": _lane_payload(task, "field_sheeting"),
         "border": _lane_payload(task, "border_sheeting"),
         "packing": {"totalHours": round(packing_seconds / 3600.0, 3)} if packing_seconds else None,
-        "dueDate": task.get("due_date_text") or "",
+        # The job's own due date, through the same reader the card uses.
+        # due_date_text is not a key any task carries, so this was always
+        # blank and Estimated Completion Date was never written.
+        "dueDate": due_date_supplied(task) or "",
         "cancelled": task.get("status") == "cancelled",
         "partCount": task.get("part_count") or 1,
     }
