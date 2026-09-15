@@ -3851,8 +3851,14 @@ def _write_to_job_board(task, user_id, client, dm_channel_id):
                     "Nothing was written to the Job Board: %s." % outcome.get("because", "no reason given"))
     elif wrote in ("updated", "created"):
         where = "updated row %s of" % outcome["row"] if wrote == "updated" else "added row %s to" % outcome["row"]
-        _quiet_note(client, dm_channel_id, task,
-                    "Job Board %s the Current sheet, under invoice %s." % (where, outcome.get("invoiceNo", "")))
+        note = "Job Board %s the Current sheet, under invoice %s." % (where, outcome.get("invoiceNo", ""))
+        # A new row where an open one already existed is a DECISION, not an
+        # accident: the board's row disagreed about what the job is made of, so
+        # it was left for David rather than filled in over the top. Saying so
+        # is the difference between a considered refusal and a duplicate.
+        if outcome.get("conflict"):
+            note += " An open row for that number was left alone: %s." % outcome["conflict"]
+        _quiet_note(client, dm_channel_id, task, note)
 
 
 def _quiet_note(client, channel_id, task, text):
@@ -3866,11 +3872,16 @@ def _quiet_note(client, channel_id, task, text):
 
 def _lane_payload(task, phase):
     """One lane as the Job Board write wants it, or None if the job has none."""
-    lane = lane_of(task, None, phase)
+    # Lane work is filed against a part, and a linear job has exactly one -
+    # _only_part is where every other reader gets it. Asking for part None
+    # matches no row at all, so the lane came back empty and the board got a
+    # job with no design, no difficulty, no jig and no time against it.
+    part = _only_part(task)
+    lane = lane_of(task, part, phase)
     if not lane.get("present", True):
         return None
-    seconds = work_elapsed(task, None, phase, "production") or 0
-    setup = work_elapsed(task, None, phase, "setup") or 0
+    seconds = work_elapsed(task, part, phase, "production") or 0
+    setup = work_elapsed(task, part, phase, "setup") or 0
     payload = {}
     if lane.get("design"):
         payload["designName"] = lane["design"]
