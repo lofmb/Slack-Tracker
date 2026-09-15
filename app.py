@@ -1717,13 +1717,17 @@ def linear_secondary(task):
         lane sheeting running Start cutting, Add a Jig
         cutting running       Add a Jig
 
-        opening setup         nothing - Cancel job is on the card itself
-                              there (_cancel_belongs_on_the_card), and Edit
-                              details does not belong to a job nobody has
-                              looked at yet
+        opening setup         nothing
         packing               nothing applies
         paused                nothing; Resume is the whole card
         ready to finish       nothing; finishing it is the whole card
+
+    Cancel job is the one action those four still need, and it is drawn on the
+    card in the two of them where it can still apply rather than behind a More
+    that would otherwise open only it - see _cancel_belongs_on_the_card. Edit
+    details is not offered in any of them: a job nobody has read yet has
+    nothing to correct, and a job one press from finished has nobody left to
+    correct it for.
     """
     here = task.get("working_on") or {}
     cutting = task.get("cutting_now")
@@ -1773,26 +1777,32 @@ def _cancel_belongs_on_the_card(task):
     """
     Whether Cancel job is a press on the card itself rather than behind More.
 
-    Exactly one state: the job's own opening setup, running. That is the first
-    thing an assembler sees after logging a job, and so the moment they find
-    they logged the wrong one - the invoice belongs to another job, or the
-    sheet in front of them is not this job at all.
+    ONE RULE, so an assembler never has to learn two places: cancelling is on
+    the card in the states that have no More, and inside More in the states
+    that have one for other reasons. Only one of the two is ever offered at a
+    time, so there is no version of this card where it is in both places and no
+    version where it is in neither.
 
-    There is no other way to reach it from here. More is deliberately absent
-    from the opening setup (see _looking_after_the_job_applies) and /track has
-    no subcommand that cancels, so without this the correction would mean
-    starting a lane setup - inventing a design and a difficulty for a job that
-    should never have been entered - before the button could be reached. What
-    stops it being a mis-press is the button itself: it is danger-styled and
-    asks before it cancels anything.
+    The two states with no More are the job's own opening setup and a paused
+    job, and both are exactly where this press is needed. The opening setup is
+    the first thing an assembler sees after logging a job, and so the moment
+    they find they logged the wrong one - the invoice belongs to another job,
+    or the sheet in front of them is not this job at all. A paused job with
+    nothing made on it is the same mistake, discovered later.
 
-    Still gated on delete_still_applies, so a job that has already produced
-    something never offers it.
+    delete_still_applies is what keeps this from being clutter: once the job
+    has produced anything at all the button is gone, from the card and from
+    More alike, so a paused job that is genuinely half-made shows Resume and
+    nothing else. And what stops a mis-press is the button itself - it is
+    danger-styled and asks before it cancels anything.
     """
+    if not delete_still_applies(task):
+        return False
     here = task.get("working_on") or {}
-    return (here.get("phase") == "job_setup"
-            and here.get("activity") == "setup"
-            and delete_still_applies(task))
+    if not here:
+        # Paused: Resume is the whole card, and this beside it.
+        return True
+    return here.get("phase") == "job_setup" and here.get("activity") == "setup"
 
 
 # ---------------------------------------------------------------------------
