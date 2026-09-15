@@ -3629,12 +3629,18 @@ def handle_add_jig_submission(ack, body, client):
 
     A CORRECTION CHANGES THE VALUE; it does not leave the wrong one standing
     beside the right one. LMSA keeps what it used to say in the audit trail, so
-    nothing is lost by fixing a typo, and the lane reads as one jig because one
-    jig is what was used.
+    a typo can be fixed without losing what it said before, and the lane reads
+    as one jig because one jig is what was used.
 
-    Adding is still there, and still means what it says: a second jig that was
-    genuinely used as well, which happens when one is swapped part way through
-    or two sizes are needed together.
+    Adding still means what it says: a second jig genuinely used as well, when
+    one is swapped part way through or two sizes are needed together.
+
+    CORRECTING HAPPENS ONLY WHEN IT WAS CHOSEN. A form that never offered the
+    choice cannot have expressed it - a card posted before this existed, or any
+    submission that is not the modal above - and treating those as corrections
+    would silently overwrite a value nobody asked to change. The modal
+    pre-selects correcting, so an assembler still gets it by default where the
+    default is a real choice.
     """
     ack()
     user_id = body["user"]["id"]
@@ -3648,26 +3654,28 @@ def handle_add_jig_submission(ack, body, client):
     if not jig_size:
         return
 
-    task = resolve_job(client, body, task_id, user_id, channel_id)
-    if task is None:
+    how = ((vals.get("how_block", {}).get("how", {}) or {}).get("selected_option") or {}).get("value")
+    correcting = bool(jig_id) and how == "correct"
+    if correcting:
+        database.correct_jig(task_id, jig_id, jig_size)
+    else:
+        database.add_jig(task_id, metadata.get("phase") or "field_sheeting", jig_size,
+                         part=metadata.get("part"))
+    task = database.get_task(task_id)
+
+    # The job can disappear between opening the modal and submitting it -
+    # deleted, or finished. Tell the assembler instead of closing the modal in
+    # silence with their jig unrecorded, and leave the final card alone.
+    if task is None or task["current_phase"] == "completed":
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text=f"'{jig_size}' was not recorded - that job is no longer open."
+        )
         return
 
-    # CORRECTING ONLY WHEN IT WAS ACTUALLY CHOSEN. A form that never offered the
-    # choice cannot have expressed it - a card posted before this existed, or a
-    # submission from anything but the modal above - and defaulting such a
-    # submission to "correct" would silently overwrite a value nobody asked to
-    # change. Absence of the control means the behaviour that came before it.
-    # The modal itself pre-selects correcting, so an assembler still gets it by
-    # default where the default is an actual choice.
-    how = ((vals.get("how_block", {}).get("how", {}) or {}).get("selected_option") or {}).get("value")
-    if jig_id and how == "correct":
-        database.correct_jig(task_id, jig_id, jig_size)
-        note = "*Jig corrected: %s*" % jig_size
-    else:
-        database.add_jig(task_id, metadata["phase"], jig_size, part=metadata["part"])
-        note = "*Jig recorded: %s*" % jig_size
-
-    update_card(client, database.get_task(task_id), channel_id, note=note)
+    update_card(client, task, channel_id,
+                note=("*Jig corrected: %s*" if correcting else "*Jig recorded: %s*") % jig_size)
 
 
 @app.action("trk_delete_task")
