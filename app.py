@@ -3870,6 +3870,22 @@ def _quiet_note(client, channel_id, task, text):
         print("[tracker] could not post the job board note: %s" % err, flush=True)
 
 
+def _as_number(value):
+    """A figure the Job Board can hold, or None if it is not one."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    return int(number) if number.is_integer() else number
+
+
 def _lane_payload(task, phase):
     """One lane as the Job Board write wants it, or None if the job has none."""
     # Lane work is filed against a part, and a linear job has exactly one -
@@ -3885,8 +3901,14 @@ def _lane_payload(task, phase):
     payload = {}
     if lane.get("design"):
         payload["designName"] = lane["design"]
-    if lane.get("difficulty") is not None:
-        payload["difficulty"] = lane["difficulty"]
+    # As a NUMBER. The difficulty is held as the text the assembler typed, and
+    # the board's column is numeric; sending the text loses the whole write to
+    # a type difference that carries no meaning. A value that is not a number
+    # is not a difficulty the board can hold, so it is left off rather than
+    # guessed at.
+    difficulty = _as_number(lane.get("difficulty"))
+    if difficulty is not None:
+        payload["difficulty"] = difficulty
     jigs = lane.get("jigs") or []
     if jigs:
         # The board has one jig cell per lane; the Tracker can hold several.
