@@ -2690,9 +2690,16 @@ def new_job_view(channel_id):
                 "type": "input",
                 "block_id": "invoice_block",
                 "label": {"type": "plain_text", "text": "Invoice / Pro Forma number"},
+                # The same as the customer box, for the same reason: a number
+                # is as good a way into a job as a name, and plenty of jobs are
+                # not on the board at all.
+                "dispatch_action": True,
                 "element": {
                     "type": "plain_text_input",
-                    "action_id": "invoice_num",
+                    "action_id": "trk_invoice_num",
+                    "dispatch_action_config": {
+                        "trigger_actions_on": ["on_character_entered"],
+                    },
                 },
             },
             {
@@ -2852,7 +2859,7 @@ def _current_form_values(view):
     chosen = ((state.get("work_block") or {}).get("work") or {}).get("selected_option")
     return {
         "customer": typed("customer_block", "trk_customer_name"),
-        "invoice": typed("invoice_block", "invoice_num"),
+        "invoice": typed("invoice_block", "trk_invoice_num"),
         "due_date": typed("date_block", "due_date"),
         "work": (chosen or {}).get("value"),
     }
@@ -2872,7 +2879,7 @@ def _block_value(vals, prefix, action):
     return ""
 
 
-def _rebuilt_new_job(view, values, suggestions=None, replace=False):
+def _rebuilt_new_job(view, values, suggestions=None, replace=False, under="customer"):
     """
     The same form, with what is on screen kept and any matches drawn in.
 
@@ -2886,7 +2893,7 @@ def _rebuilt_new_job(view, values, suggestions=None, replace=False):
     blocks = []
     for block in rebuilt["blocks"]:
         block_id = block.get("block_id")
-        if replace and block_id in ("customer_block", "invoice_block"):
+        if replace and block_id in ("customer_block", "invoice_block", "date_block"):
             block["block_id"] = "%s#%s" % (block_id, generation)
         if block_id == "customer_block" and values.get("customer"):
             block["element"]["initial_value"] = values["customer"]
@@ -2901,7 +2908,8 @@ def _rebuilt_new_job(view, values, suggestions=None, replace=False):
         blocks.append(block)
         # The matches sit directly under the box they came from, and only while
         # there are any. Nothing is left behind once one is taken.
-        if block_id == "customer_block" and suggestions:
+        suggestion_anchor = "invoice_block" if under == "invoice" else "customer_block"
+        if block_id == suggestion_anchor and suggestions:
             blocks.append({
                 "type": "actions",
                 "block_id": SUGGESTION_BLOCK,
@@ -2921,21 +2929,24 @@ def _rebuilt_new_job(view, values, suggestions=None, replace=False):
     return rebuilt
 
 
-@app.action(re.compile(r"^trk_customer_name$"))
-def handle_customer_typing(ack, body, client):
+@app.action(re.compile(r"^trk_(customer_name|invoice_num)$"))
+def handle_job_search_typing(ack, body, client):
     """
     Offer the open Job Board jobs that match what is being typed.
 
-    Only from three characters - below that almost everything matches, which is
-    a list nobody reads - and only when the set of matches actually changes,
-    because every redraw is a views.update and Slack counts them.
+    Both boxes search, and a match found either way is the same job. Only from
+    three characters - below that almost everything matches, which is a list
+    nobody reads - and only when the set of matches actually changes, because
+    every redraw is a views.update and Slack counts them.
     """
     ack()
     view = body.get("view") or {}
     if not view.get("id"):
         return
+    action_id = ((body.get("actions") or [{}])[0]).get("action_id") or ""
     values = _current_form_values(view)
-    typed = (values.get("customer") or "").strip()
+    field = "invoice" if action_id.endswith("invoice_num") else "customer"
+    typed = (values.get(field) or "").strip()
     matches = database.job_board_search(typed) if len(typed) >= 3 else []
 
     shown = []
@@ -2946,7 +2957,8 @@ def handle_customer_typing(ack, body, client):
         return  # the same matches are already on screen
 
     try:
-        client.views_update(view_id=view["id"], view=_rebuilt_new_job(view, values, matches))
+        client.views_update(view_id=view["id"],
+                            view=_rebuilt_new_job(view, values, matches, under=field))
     except Exception as err:  # noqa: BLE001
         print("[tracker] could not draw the job board suggestions: %s" % err, flush=True)
 
@@ -2970,10 +2982,14 @@ def handle_pick_job(ack, body, client):
     if not row:
         return
     values = _current_form_values(view)
+    # Three fields, and only these three. The board's designs, difficulties and
+    # jigs are deliberately NOT copied: they are filled in as the job is worked,
+    # through the lane forms, where the assembler is looking at the diagram.
+    # And the job's shape stays their answer - a blank border column on the
+    # board means David has not filled it in, not that there is no border.
     values["customer"] = row.get("customer") or values.get("customer")
     values["invoice"] = row.get("invoiceNo") or values.get("invoice")
-    if row.get("dueDate"):
-        values["due_date"] = row["dueDate"]
+    values["due_date"] = row.get("dueDate") or ""
     try:
         client.views_update(view_id=view["id"],
                             view=_rebuilt_new_job(view, values, None, replace=True))
@@ -2995,7 +3011,7 @@ def handle_new_job(ack, body, client):
     team_channel_id, _ = _new_job_metadata(body["view"].get("private_metadata"))
 
     customer_name = _block_value(vals, "customer_block", "trk_customer_name")
-    invoice_number = _block_value(vals, "invoice_block", "invoice_num")
+    invoice_number = _block_value(vals, "invoice_block", "trk_invoice_num")
 
     # An empty box is carried as nothing at all, not as the word "N/A". Nobody
     # has given this assembler a date yet; that is not a job with no deadline.
@@ -3866,6 +3882,7 @@ def _job_board_payload(task, user_id):
         "field": _lane_payload(task, "field_sheeting"),
         "border": _lane_payload(task, "border_sheeting"),
         "packing": {"totalHours": round(packing_seconds / 3600.0, 3)} if packing_seconds else None,
+        "dueDate": task.get("due_date_text") or "",
         "cancelled": task.get("status") == "cancelled",
         "partCount": task.get("part_count") or 1,
     }
