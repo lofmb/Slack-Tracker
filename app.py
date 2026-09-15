@@ -628,7 +628,7 @@ def header_text(task, suffix=""):
     """
     prefix = "T-" + str(task["task_id"]) + "  "
     room = HEADER_LIMIT - len(prefix) - len(suffix)
-    name = task["trk_customer_name"] or ""
+    name = task["customer_name"] or ""
     if len(name) > room:
         name = name[: max(room - 1, 0)].rstrip() + "…"
     return prefix + name + suffix
@@ -1357,7 +1357,7 @@ def _foot_lines(task):
     here = task.get("working_on") or {}
     first = "  ·  ".join(str(bit) for bit in (
         "T-" + str(task["task_id"]),
-        task["trk_customer_name"],
+        task["customer_name"],
         task["task_description"],
     ) if bit)
 
@@ -2270,7 +2270,7 @@ def busy_elsewhere_text(active):
     if active:
         return (
             "You're already working on T-" + str(active["task_id"]) + " "
-            + active["trk_customer_name"] + ". Pause that job before starting this one."
+            + active["customer_name"] + ". Pause that job before starting this one."
         )
     return "You're already working on another job. Pause that one before starting this."
 
@@ -2545,7 +2545,7 @@ def handle_export(body, client):
 
         ws.append([
             f"T-{task['task_id']}",
-            task["trk_customer_name"],
+            task["customer_name"],
             task["invoice_number"],
             task["task_description"],
             due_date_display(task),
@@ -3835,7 +3835,7 @@ def _job_board_payload(task, user_id):
     """Everything the Job Board write needs, from the finished job."""
     packing_seconds = work_elapsed(task, None, "packing", "production") or 0
     return {
-        "customer": task.get("trk_customer_name") or "",
+        "customer": task.get("customer_name") or "",
         "enteredNumber": str(task.get("invoice_number") or "").strip(),
         "assembledBy": task.get("assembled_by") or user_id,
         "field": _lane_payload(task, "field_sheeting"),
@@ -4169,7 +4169,7 @@ def handle_edit(ack, body, client):
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "trk_customer_name",
-                        "initial_value": task["trk_customer_name"]
+                        "initial_value": task["customer_name"]
                     }
                 },
                 {
