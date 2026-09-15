@@ -2643,6 +2643,41 @@ WORK_BOTH = "both"
 WORK_CHOICE_ERROR = "Say whether the job has a field, a border, or both."
 
 
+# Finding a job David has already booked, so it is not typed twice.
+#
+# He enters a job on the Job Board when the order comes in: the customer, the
+# paperwork number, and often the designs. By the time it reaches a bench all
+# of that exists, and asking an assembler to type it again is asking for a
+# second spelling of the same job.
+#
+# The search covers OPEN jobs only. A job on Ready For Dispatch or Complete has
+# already been made, and attaching today's work to one of those would write
+# this week's timings over last month's finished job.
+#
+# It is an accessory rather than an input: an accessory dispatches the moment
+# something is picked, which is what lets the rest of the form fill itself in.
+# Nothing here is required - no match is an ordinary answer, and the assembler
+# types the job as they always have.
+def _job_lookup_blocks():
+    if not database.job_board_enabled():
+        return []
+    return [
+        {
+            "type": "section",
+            "block_id": "lookup_block",
+            "text": {"type": "mrkdwn",
+                     "text": "*Already on the Job Board?*\nStart typing the customer or the number."},
+            "accessory": {
+                "type": "external_select",
+                "action_id": "trk_job_lookup",
+                "min_query_length": 1,
+                "placeholder": {"type": "plain_text", "text": "Find an existing job"},
+            },
+        },
+        {"type": "divider"},
+    ]
+
+
 def new_job_view(channel_id):
     """
     The New Job form.
@@ -2664,7 +2699,7 @@ def new_job_view(channel_id):
         "private_metadata": channel_id,
         "submit": {"type": "plain_text", "text": "Create the job"},
         "close": {"type": "plain_text", "text": "Cancel"},
-        "blocks": [
+        "blocks": _job_lookup_blocks() + [
             {
                 "type": "input",
                 "block_id": "customer_block",
@@ -2922,6 +2957,68 @@ def handle_start(ack, body, client):
     update_card(client, task, channel_id)
 
 
+# The design names belong to the Job Board, so the form offers ITS names.
+#
+# Typing filters them as the assembler types - "50 c" finds CLASSIC 50 - and
+# what gets saved is the workbook's own spelling, exactly. Free text is how the
+# board ends up with four spellings of one design, which is what breaks its
+# dropdowns and its statistics.
+#
+# If the Job Board is not configured the field stays the plain box it has
+# always been. A menu with nothing in it would be worse than the box: it reads
+# to an assembler as "your design does not exist".
+DESIGN_ACTION = {"field": "trk_field_design", "border": "trk_border_design"}
+
+
+def _design_block(which, current):
+    if not database.job_board_enabled():
+        return {
+            "type": "input",
+            "block_id": "design_block",
+            "label": {"type": "plain_text", "text": "Design"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "val",
+                "initial_value": current or "",
+            },
+        }
+    element = {
+        "type": "external_select",
+        "action_id": DESIGN_ACTION[which],
+        # One character, because a design is as often found by its size as by
+        # its name: an assembler looking for CLASSIC 50 may well start with 50.
+        "min_query_length": 1,
+        "placeholder": {"type": "plain_text", "text": "Start typing the design"},
+    }
+    if current:
+        element["initial_option"] = {
+            "text": {"type": "plain_text", "text": current[:75]},
+            "value": current,
+        }
+    return {
+        "type": "input",
+        "block_id": "design_block",
+        "label": {"type": "plain_text", "text": "Design"},
+        "element": element,
+    }
+
+
+def _read_design(vals):
+    """
+    The design, from whichever kind of field the form drew.
+
+    A picked option carries the Job Board's own spelling; a typed box carries
+    whatever was typed. Both are read here so the submission handler does not
+    have to know which one it got.
+    """
+    block = (vals or {}).get("design_block") or {}
+    for action in ("trk_field_design", "trk_border_design"):
+        chosen = (block.get(action) or {}).get("selected_option")
+        if chosen:
+            return (chosen.get("value") or "").strip()
+    return (_typed(vals, "design_block", "val") or "").strip()
+
+
 def lane_details_view(task, part, phase, activity, channel_id):
     """
     What this lane is, asked on the way into it.
@@ -2974,18 +3071,7 @@ def lane_details_view(task, part, phase, activity, channel_id):
             "channel_id": channel_id,
         }),
         "blocks": [
-            {
-                "type": "input",
-                "block_id": "design_block",
-                "label": {"type": "plain_text", "text": "Design"},
-                "element": {
-                    "type": "plain_text_input",
-                    "action_id": "val",
-                    "initial_value": lane.get("design") or "",
-                    "placeholder": {"type": "plain_text",
-                                    "text": "e.g. Tivoli" if which == "field" else "e.g. Greek Key"},
-                },
-            },
+            _design_block(which, lane.get("design") or ""),
             {
                 "type": "input",
                 "block_id": "difficulty_block",
@@ -3026,7 +3112,7 @@ def handle_lane_details(ack, body, client):
     vals = body["view"]["state"]["values"]
     meta = json.loads(body["view"]["private_metadata"])
 
-    design = (_typed(vals, "design_block", "val") or "").strip()
+    design = _read_design(vals)
     if not design:
         ack(response_action="errors", errors={"design_block": "Name the design."})
         return
@@ -3505,6 +3591,89 @@ def handle_notes_submission(ack, body, client):
         channel=team_channel_id,
         text=f"{MARK_FINISHED} <@{user_id}> has finished T-{task_id} {task['customer_name']}",
     )
+
+    # And now the Job Board, once, with the whole job known.
+    _write_to_job_board(task, user_id, client, dm_channel_id)
+
+
+def _write_to_job_board(task, user_id, client, dm_channel_id):
+    """
+    Put the finished job on David's board.
+
+    ONCE, here, rather than a little at each step: the workbook lives on a
+    share he may have open, and a job paused overnight would otherwise leave a
+    half-written row behind it.
+
+    A failure never fails the finish. The job IS finished and the Tracker holds
+    the record; losing a completion because a file share was busy would be much
+    the worse outcome. The assembler is told quietly so somebody knows.
+    """
+    if not database.job_board_enabled():
+        return
+    outcome = database.job_board_finish(_job_board_payload(task, user_id))
+    if outcome is None:
+        _quiet_note(client, dm_channel_id, task,
+                    "The job is finished and recorded. The Job Board could not be "
+                    "updated just now - it can be brought up to date later.")
+        return
+    wrote = outcome.get("wrote")
+    if wrote == "nothing":
+        # Cancelled and several-part jobs land here by design, and so does a
+        # row that already holds everything. Saying which keeps it honest.
+        _quiet_note(client, dm_channel_id, task,
+                    "Nothing was written to the Job Board: %s." % outcome.get("because", "no reason given"))
+    elif wrote in ("updated", "created"):
+        where = "updated row %s of" % outcome["row"] if wrote == "updated" else "added row %s to" % outcome["row"]
+        _quiet_note(client, dm_channel_id, task,
+                    "Job Board %s the Current sheet, under invoice %s." % (where, outcome.get("invoiceNo", "")))
+
+
+def _quiet_note(client, channel_id, task, text):
+    """A line in the assembler's own DM. Never the workshop channel."""
+    try:
+        client.chat_postMessage(channel=channel_id, text=text,
+                                thread_ts=task.get("message_ts"))
+    except Exception as err:  # noqa: BLE001
+        print("[tracker] could not post the job board note: %s" % err, flush=True)
+
+
+def _lane_payload(task, phase):
+    """One lane as the Job Board write wants it, or None if the job has none."""
+    lane = lane_of(task, None, phase)
+    if not lane.get("present", True):
+        return None
+    seconds = work_elapsed(task, None, phase, "production") or 0
+    setup = work_elapsed(task, None, phase, "setup") or 0
+    payload = {}
+    if lane.get("design"):
+        payload["designName"] = lane["design"]
+    if lane.get("difficulty") is not None:
+        payload["difficulty"] = lane["difficulty"]
+    jigs = lane.get("jigs") or []
+    if jigs:
+        # The board has one jig cell per lane; the Tracker can hold several.
+        # The first is the one the lane was set up with.
+        payload["jigSize"] = str(jigs[0])
+    total = (seconds + setup) / 3600.0
+    if total:
+        payload["totalHours"] = round(total, 3)
+    return payload or None
+
+
+def _job_board_payload(task, user_id):
+    """Everything the Job Board write needs, from the finished job."""
+    packing_seconds = work_elapsed(task, None, "packing", "production") or 0
+    return {
+        "customer": task.get("customer_name") or "",
+        "enteredNumber": str(task.get("invoice_number") or "").strip(),
+        "assembledBy": task.get("assembled_by") or user_id,
+        "linkedInvoiceNo": (task.get("job_board_invoice") or None),
+        "field": _lane_payload(task, "field_sheeting"),
+        "border": _lane_payload(task, "border_sheeting"),
+        "packing": {"totalHours": round(packing_seconds / 3600.0, 3)} if packing_seconds else None,
+        "cancelled": task.get("status") == "cancelled",
+        "partCount": task.get("part_count") or 1,
+    }
 
 
 # ---------------------------------------------------------------------------

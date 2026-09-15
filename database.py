@@ -35,7 +35,9 @@ import hashlib
 import json
 import os
 import threading
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -1533,3 +1535,80 @@ def get_completed_tasks():
 
 if __name__ == "__main__":
     setup_database()
+
+
+# ---------------------------------------------------------------------------
+# The Job Board
+# ---------------------------------------------------------------------------
+# The workbook David keeps. The Tracker reads it to save the assembler typing
+# what he has already entered, and writes to it once, when a job is finished.
+# Every call here is to LMSA, which owns the cached copies - the Tracker never
+# opens the workbook itself.
+
+_JOB_BOARD_STATE = {"enabled": None, "checked_at": 0.0}
+_JOB_BOARD_RECHECK_SECONDS = 300
+
+
+def job_board_enabled():
+    """
+    Whether the Job Board is configured at all.
+
+    Cached for a few minutes because it decides which kind of field the design
+    form draws, and that question is asked every time a lane is entered. An
+    unreachable LMSA answers "no", which keeps the form on its plain box rather
+    than drawing a menu nothing can fill.
+    """
+    now = time.time()
+    if (_JOB_BOARD_STATE["enabled"] is not None
+            and now - _JOB_BOARD_STATE["checked_at"] < _JOB_BOARD_RECHECK_SECONDS):
+        return _JOB_BOARD_STATE["enabled"]
+    try:
+        body = _call("GET", "/job-board/health")
+        enabled = bool(body.get("enabled"))
+    except Exception:  # noqa: BLE001 - any failure means "not available"
+        enabled = False
+    _JOB_BOARD_STATE["enabled"] = enabled
+    _JOB_BOARD_STATE["checked_at"] = now
+    return enabled
+
+
+def job_board_open_job(invoice_no):
+    """One open Current row, or None. Used to prefill the New Job form."""
+    try:
+        return _call("GET", "/job-board/open-job/%s" % urllib.parse.quote(str(invoice_no)))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def job_board_check_link(invoice_no, has_field, has_border):
+    """
+    Whether this job's shape agrees with that open row.
+
+    Asked while the job is being created, so a disagreement reaches the
+    assembler when they can still do something about it.
+    """
+    try:
+        return _call("POST", "/job-board/check-link", {
+            "invoiceNo": str(invoice_no),
+            "hasField": bool(has_field),
+            "hasBorder": bool(has_border),
+        })
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def job_board_finish(payload):
+    """
+    The one write, at the end of the job.
+    
+    Returns LMSA's account of what it did, or None if it could not be reached.
+    A failure here must never fail the finish: the job IS finished, the Tracker
+    has its own record of it, and the Job Board can be brought up to date
+    afterwards. Losing the completion because a file share was busy would be
+    the worse outcome by far.
+    """
+    try:
+        return _call("POST", "/job-board/finish", payload)
+    except Exception as err:  # noqa: BLE001
+        print("[tracker] job board write failed: %s" % err, flush=True)
+        return None
