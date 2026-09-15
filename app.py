@@ -2879,6 +2879,21 @@ def _block_value(vals, prefix, action):
     return ""
 
 
+def _block_id(vals, prefix):
+    """
+    The id the block is CARRYING right now.
+
+    A Slack error has to name a block that is actually in the view, so an error
+    on a re-issued block must be addressed to date_block#3, not date_block -
+    Slack drops an error for a block it cannot find, and the form then closes
+    on an invalid value with no message.
+    """
+    for block_id in (vals or {}):
+        if block_id == prefix or block_id.startswith(prefix + "#"):
+            return block_id
+    return prefix
+
+
 def _rebuilt_new_job(view, values, suggestions=None, replace=False, under="customer"):
     """
     The same form, with what is on screen kept and any matches drawn in.
@@ -3015,11 +3030,11 @@ def handle_new_job(ack, body, client):
 
     # An empty box is carried as nothing at all, not as the word "N/A". Nobody
     # has given this assembler a date yet; that is not a job with no deadline.
-    due_date, due_date_error = read_due_date(_typed(vals, "date_block", "due_date"))
+    due_date, due_date_error = read_due_date(_block_value(vals, "date_block", "due_date"))
     if due_date_error:
         # Sent back to the box it belongs to, so the assembler reads the message
         # under the date rather than losing the whole form.
-        ack(response_action="errors", errors={"date_block": due_date_error})
+        ack(response_action="errors", errors={_block_id(vals, "date_block"): due_date_error})
         return
 
     work = read_work_required(vals)
