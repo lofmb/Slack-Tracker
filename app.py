@@ -2643,41 +2643,6 @@ WORK_BOTH = "both"
 WORK_CHOICE_ERROR = "Say whether the job has a field, a border, or both."
 
 
-# Finding a job David has already booked, so it is not typed twice.
-#
-# He enters a job on the Job Board when the order comes in: the customer, the
-# paperwork number, and often the designs. By the time it reaches a bench all
-# of that exists, and asking an assembler to type it again is asking for a
-# second spelling of the same job.
-#
-# The search covers OPEN jobs only. A job on Ready For Dispatch or Complete has
-# already been made, and attaching today's work to one of those would write
-# this week's timings over last month's finished job.
-#
-# It is an accessory rather than an input: an accessory dispatches the moment
-# something is picked, which is what lets the rest of the form fill itself in.
-# Nothing here is required - no match is an ordinary answer, and the assembler
-# types the job as they always have.
-def _job_lookup_blocks():
-    if not database.job_board_enabled():
-        return []
-    return [
-        {
-            "type": "section",
-            "block_id": "lookup_block",
-            "text": {"type": "mrkdwn",
-                     "text": "*Already on the Job Board?*\nStart typing the customer or the number."},
-            "accessory": {
-                "type": "external_select",
-                "action_id": "trk_job_lookup",
-                "min_query_length": 1,
-                "placeholder": {"type": "plain_text", "text": "Find an existing job"},
-            },
-        },
-        {"type": "divider"},
-    ]
-
-
 def new_job_view(channel_id):
     """
     The New Job form.
@@ -2699,7 +2664,7 @@ def new_job_view(channel_id):
         "private_metadata": channel_id,
         "submit": {"type": "plain_text", "text": "Create the job"},
         "close": {"type": "plain_text", "text": "Cancel"},
-        "blocks": _job_lookup_blocks() + [
+        "blocks": [
             {
                 "type": "input",
                 "block_id": "customer_block",
@@ -2732,14 +2697,18 @@ def new_job_view(channel_id):
             {
                 "type": "input",
                 "block_id": "work_block",
-                "label": {"type": "plain_text", "text": "Work on this job"},
+                # What the JOB contains, not what this assembler is about to do.
+                # "Work on this job" read as a question about the next hour,
+                # which is a different question with a different answer: a job
+                # has a field and a border whoever is at the bench today.
+                "label": {"type": "plain_text", "text": "This job has"},
                 "element": {
                     "type": "radio_buttons",
                     "action_id": "work",
                     "options": [
-                        {"text": {"type": "plain_text", "text": "Field only"},
+                        {"text": {"type": "plain_text", "text": "Field"},
                          "value": WORK_FIELD_ONLY},
-                        {"text": {"type": "plain_text", "text": "Border only"},
+                        {"text": {"type": "plain_text", "text": "Border"},
                          "value": WORK_BORDER_ONLY},
                         {"text": {"type": "plain_text", "text": "Field and border"},
                          "value": WORK_BOTH},
@@ -2789,6 +2758,70 @@ def _typed(values, block_id, action_id):
     return (block.get(action_id) or {}).get("value")
 
 
+def _new_job_metadata(metadata):
+    """The channel the form came from, and the Job Board row if one was picked."""
+    raw = metadata or ""
+    if raw.startswith("{"):
+        try:
+            parsed = json.loads(raw)
+            return parsed.get("channel_id") or "", parsed.get("job_board_invoice") or None
+        except ValueError:
+            return raw, None
+    return raw, None
+
+
+@app.action("trk_job_lookup")
+def handle_job_lookup(ack, body, client):
+    """
+    Fill the New Job form from the Job Board entry the assembler picked.
+
+    Only what David has actually entered on that row is copied: his customer
+    and his paperwork number. The designs are NOT copied into this form - it
+    does not ask for them - but the row is remembered, so the lane forms can
+    offer his design later and the finished job goes back to his row rather
+    than starting a second one.
+
+    Which lanes the job has is left alone, deliberately. The board's designs
+    hint at it, but the assembler is holding the drawing and it is the one
+    answer on this form that cannot be got from anywhere else.
+    """
+    ack()
+    chosen = (body.get("actions") or [{}])[0].get("selected_option") or {}
+    invoice_no = (chosen.get("value") or "").strip()
+    view = body.get("view") or {}
+    if not invoice_no or not view.get("id"):
+        return
+
+    row = database.job_board_open_job(invoice_no)
+    if not row:
+        return
+
+    # Rebuild the form with the two fields filled in, keeping the rest as the
+    # assembler left it. The lookup itself keeps its selection so the choice
+    # they made is still on screen.
+    rebuilt = new_job_view(view.get("private_metadata") or "")
+    for block in rebuilt["blocks"]:
+        block_id = block.get("block_id")
+        if block_id == "customer_block":
+            block["element"]["initial_value"] = row.get("customer") or ""
+        elif block_id == "invoice_block":
+            block["element"]["initial_value"] = row.get("invoiceNo") or ""
+        elif block_id == "lookup_block":
+            block["accessory"]["initial_option"] = {
+                "text": {"type": "plain_text", "text": (row.get("customer") or "")[:75]},
+                "value": invoice_no,
+            }
+    # The row travels with the form so the finish knows which one to fill.
+    rebuilt["private_metadata"] = json.dumps({
+        "channel_id": view.get("private_metadata") or "",
+        "job_board_invoice": invoice_no,
+    })
+    try:
+        client.views_update(view_id=view["id"], view=rebuilt)
+    except Exception as err:  # noqa: BLE001
+        print("[tracker] could not prefill from the job board: %s" % err, flush=True)
+
+
 @app.view("trk_new_job")
 def handle_new_job(ack, body, client):
     """
@@ -2796,7 +2829,11 @@ def handle_new_job(ack, body, client):
     """
     user_id = body["user"]["id"]
     vals = body["view"]["state"]["values"]
-    team_channel_id = body["view"]["private_metadata"]
+    # The form carries the channel it was opened from, and once a Job Board
+    # entry has been picked, the pair. Only the channel is needed here: the
+    # invoice the assembler ends up with is what finds the row again at the
+    # end, and that is on the job itself.
+    team_channel_id, _ = _new_job_metadata(body["view"].get("private_metadata"))
 
     customer_name = _typed(vals, "customer_block", "customer_name")
     invoice_number = _typed(vals, "invoice_block", "invoice_num")
@@ -3667,7 +3704,6 @@ def _job_board_payload(task, user_id):
         "customer": task.get("customer_name") or "",
         "enteredNumber": str(task.get("invoice_number") or "").strip(),
         "assembledBy": task.get("assembled_by") or user_id,
-        "linkedInvoiceNo": (task.get("job_board_invoice") or None),
         "field": _lane_payload(task, "field_sheeting"),
         "border": _lane_payload(task, "border_sheeting"),
         "packing": {"totalHours": round(packing_seconds / 3600.0, 3)} if packing_seconds else None,
