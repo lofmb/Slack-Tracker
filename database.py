@@ -35,7 +35,9 @@ import hashlib
 import json
 import os
 import threading
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -278,7 +280,14 @@ def _call(method, path, payload=None, operation=None):
     error = envelope.get("error")
     if error == "refused" or envelope.get("reason"):
         raise TrackerRefused(envelope.get("reason") or error, envelope.get("detail"))
-    raise TrackerApiError(f"tracker API error: {error} (HTTP {status})")
+    # The envelope's detail is the whole diagnostic value of a 400: without it
+    # a rejected field reads only as "bad_request", and the field that was
+    # actually wrong has to be guessed at.
+    detail = envelope.get("detail")
+    raise TrackerApiError(
+        "tracker API error: %s (HTTP %s)%s"
+        % (error, status, (" - %s" % json.dumps(detail)[:400]) if detail else "")
+    )
 
 
 # --- shape translation -----------------------------------------------------
@@ -654,6 +663,7 @@ def _row(view, timing):
             if last_segment
             else None
         ),
+        "packing_boxes": job.get("packingBoxes"),
         "general_notes": job.get("generalNotes"),
         "issues_encountered": job.get("issuesEncountered"),
         "status": _legacy_status(job, phases, open_segment),
@@ -663,6 +673,20 @@ def _row(view, timing):
         "message_ts": job.get("cardMessageTs"),
         "dm_channel_id": job.get("dmChannelId"),
         "total_elapsed": int((timing or {}).get("totalSeconds") or 0),
+        # WHERE EACH PHASE BEGAN AND ENDED, and how long the job sat paused.
+        # Neither can be derived from the totals: a phase that was paused spans
+        # more clock time than it worked. Carried as the API gives them - ISO
+        # instants and whole seconds - so nothing is reinterpreted on the way.
+        "phase_boundaries": (timing or {}).get("phaseBoundaries") or {},
+        # The same, split by activity. A lane's setup and its sheeting are one
+        # PHASE, so the phase-wide boundary says when the lane was first
+        # touched - which is the start of its setup. The board asks when the
+        # sheeting began, and on a real job those are three quarters of an hour
+        # apart.
+        "activity_boundaries": (timing or {}).get("phaseActivityBoundaries") or {},
+        "first_started_at": (timing or {}).get("firstStartedAt"),
+        "paused_elapsed": int((timing or {}).get("pausedSeconds") or 0),
+        "completed_at": job.get("completedAt"),
     }
 
 
@@ -894,6 +918,12 @@ def start_work(task_id, phase=None, activity="production", part=None):
         if refusal.reason in ("already_running", "already_processed"):
             return "started"
         return refusal.reason
+
+    # WORK HAS STARTED, so there is nothing left for a timed pause to resume.
+    # Cleared here rather than at each of the buttons that start work, because
+    # every one of them would have to remember - and the one that forgot would
+    # leave a clock ticking towards an assembler who is already at the bench.
+    clear_auto_resume(task_id)
     return "started"
 
 
@@ -991,6 +1021,55 @@ def stop_cutting(task_id):
     return "stopped"
 
 
+def advance_work(task_id, phase, part, next_step):
+    """
+    Finish this lane and start the next work, without a gap between them.
+
+    NORMAL FORWARD MOVEMENT MUST NOT STOP THE CLOCK. Finishing the field
+    sheeting on a job that also has a border is not a break - it is the same
+    person, still at the bench, moving on. Doing it as two calls would leave a
+    window with nothing timed, and on a busy morning that window lasts as long
+    as it takes somebody to notice the card and press again.
+
+    `next_step` is (part, phase, activity), or None for the last lane before
+    the closing notes - which finishes and starts nothing, because there is
+    nothing left to do.
+
+    Returns "advanced", or the reason it could not. The refusals about the lane
+    being LEFT keep their old names, so a caller reads them exactly as before;
+    the ones about the lane being GONE TO are prefixed "next_", because the
+    same word for two different mistakes would leave a card unable to say which
+    happened.
+    """
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return None
+    view, row = resolved
+
+    payload = {
+        "phase": phase,
+        "partNumber": part if phase in ("field_sheeting", "border_sheeting") else None,
+        "actor": f"slack:{row['user_id']}",
+        "next": None,
+    }
+    if next_step is not None:
+        next_part, next_phase, next_activity = next_step
+        payload["next"] = {
+            "phase": next_phase,
+            "partNumber": next_part if next_phase in ("field_sheeting", "border_sheeting") else None,
+            "activity": next_activity or "production",
+        }
+
+    try:
+        _call("POST", f"/jobs/{view['job']['id']}/phases/advance", payload,
+              operation=f"advance_work_{phase}")
+    except TrackerRefused as refusal:
+        if refusal.reason in ("phase_already_complete", "already_processed"):
+            return "advanced"
+        return refusal.reason
+    return "advanced"
+
+
 def complete_task(task_id, phase=None, part=None):
     """
     Finish one lane, closing any timer still running on it.
@@ -1076,6 +1155,10 @@ def set_lane_details(task_id, phase, design, difficulty, jig=None, part=None):
 
     which = "field" if phase == "field_sheeting" else "border"
     lane = _lane_by_number(row, target_part, which)
+    # Only a BORDER can be absent and then put back here. A job without a field
+    # says so when it is created and is corrected by editing the job, so there
+    # is nothing at this point that could revert it - the asymmetry is real, not
+    # an oversight.
     if lane.get("present") is False and phase == "border_sheeting":
         outcome = _post_border_skip_revert(job_id, actor, "set_lane_details_unskip", target_part)
         if outcome != "reverted":
@@ -1233,6 +1316,79 @@ def get_phase_elapsed(task_id):
         "packing_elapsed": row["packing_elapsed"],
         "total_elapsed": row["total_elapsed"],
     }
+
+
+def set_packing_boxes(task_id, boxes):
+    """
+    Record how many boxes the job was packed into.
+
+    Its own call, made before packing is finished rather than as part of
+    finishing it: the handoff between phases is one atomic move, and a failure
+    to record a box count must not be able to cost the assembler a completion
+    they have already done.
+    """
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return
+    view, row = resolved
+    text = (boxes or "").strip() or None
+    _call("POST", f"/jobs/{view['job']['id']}/packing-boxes", {
+        "boxes": text,
+        "actor": f"slack:{row['user_id']}",
+    }, operation="set_packing_boxes")
+
+
+def set_auto_resume(task_id, minutes):
+    """
+    Remember that this pause ends by itself, and when.
+
+    Stored on the JOB rather than held in this process, because a pause outlives
+    a restart: the assembler is at lunch, and a deploy in the middle of it must
+    not quietly turn their timed break into an indefinite one. LMSA computes the
+    moment from the length, so the two sides cannot disagree about "now".
+    """
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return
+    view, row = resolved
+    _call("POST", f"/jobs/{view['job']['id']}/auto-resume", {
+        "minutes": int(minutes),
+        "actor": f"slack:{row['user_id']}",
+    }, operation="set_auto_resume")
+
+
+def clear_auto_resume(task_id):
+    """
+    This pause no longer ends by itself.
+
+    Called when the job is resumed by hand, when the automatic resume has
+    fired, and when it could not fire. Clearing is idempotent and a job with
+    nothing set is not an error - a plain Pause clears one that was never there
+    on every single press.
+    """
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return
+    view, row = resolved
+    try:
+        _call("DELETE", f"/jobs/{view['job']['id']}/auto-resume", {
+            "actor": f"slack:{row['user_id']}",
+        }, operation="clear_auto_resume")
+    except TrackerRefused as refusal:
+        if refusal.reason not in ("not_found", "already_processed"):
+            raise
+
+
+def get_due_resumes():
+    """
+    The job numbers whose set-time pause has run out, oldest first.
+
+    A read, and only a read: it never starts anything and never clears
+    anything, so a launcher that crashes between asking and acting leaves the
+    jobs exactly where they were and asks again next time round.
+    """
+    data = _call("GET", "/jobs/auto-resume/due") or {}
+    return [job["jobNumber"] for job in data.get("jobs") or []]
 
 
 def update_message_ts(task_id, dm_channel_id, message_ts):
@@ -1421,3 +1577,89 @@ def get_completed_tasks():
 
 if __name__ == "__main__":
     setup_database()
+
+
+# ---------------------------------------------------------------------------
+# The Job Board
+# ---------------------------------------------------------------------------
+# The workbook David keeps. The Tracker reads it to save the assembler typing
+# what he has already entered, and writes to it once, when a job is finished.
+# Every call here is to LMSA, which owns the cached copies - the Tracker never
+# opens the workbook itself.
+
+_JOB_BOARD_STATE = {"enabled": None, "checked_at": 0.0}
+_JOB_BOARD_RECHECK_SECONDS = 300
+
+
+def job_board_enabled():
+    """
+    Whether the Job Board is configured at all.
+
+    Cached for a few minutes because it decides which kind of field the design
+    form draws, and that question is asked every time a lane is entered. An
+    unreachable LMSA answers "no", which keeps the form on its plain box rather
+    than drawing a menu nothing can fill.
+    """
+    now = time.time()
+    if (_JOB_BOARD_STATE["enabled"] is not None
+            and now - _JOB_BOARD_STATE["checked_at"] < _JOB_BOARD_RECHECK_SECONDS):
+        return _JOB_BOARD_STATE["enabled"]
+    try:
+        body = _call("GET", "/job-board/health")
+        enabled = bool(body.get("enabled"))
+    except Exception:  # noqa: BLE001 - any failure means "not available"
+        enabled = False
+    _JOB_BOARD_STATE["enabled"] = enabled
+    _JOB_BOARD_STATE["checked_at"] = now
+    return enabled
+
+
+def job_board_open_job(invoice_no):
+    """One open Current row, or None. Used to prefill the New Job form."""
+    try:
+        return _call("GET", "/job-board/open-job/%s" % urllib.parse.quote(str(invoice_no)))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def job_board_check_link(invoice_no, has_field, has_border):
+    """
+    Whether this job's shape agrees with that open row.
+
+    Asked while the job is being created, so a disagreement reaches the
+    assembler when they can still do something about it.
+    """
+    try:
+        return _call("POST", "/job-board/check-link", {
+            "invoiceNo": str(invoice_no),
+            "hasField": bool(has_field),
+            "hasBorder": bool(has_border),
+        })
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def job_board_finish(payload):
+    """
+    The one write, at the end of the job.
+    
+    Returns LMSA's account of what it did, or None if it could not be reached.
+    A failure here must never fail the finish: the job IS finished, the Tracker
+    has its own record of it, and the Job Board can be brought up to date
+    afterwards. Losing the completion because a file share was busy would be
+    the worse outcome by far.
+    """
+    try:
+        return _call("POST", "/job-board/finish", payload)
+    except Exception as err:  # noqa: BLE001
+        print("[tracker] job board write failed: %s" % err, flush=True)
+        return None
+
+
+def job_board_search(query):
+    """Open Current jobs matching what has been typed. Never opens the workbook."""
+    try:
+        body = _call("GET", "/job-board/search?q=%s" % urllib.parse.quote(str(query)))
+        return (body or {}).get("jobs") or []
+    except Exception:  # noqa: BLE001
+        return []

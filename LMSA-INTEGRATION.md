@@ -424,6 +424,98 @@ still read faithfully; the adapter stores whatever it is handed, and the
 validation lives on the form, which is what keeps backfills and the word-for-word
 parity check honest.
 
+## One route through a job, and one form to start it (2026-09-14)
+
+The biggest change to what an assembler sees since the card was rebuilt, and it
+goes the other way from that rebuild. **It reverses a decision we made on
+purpose, so the reasoning is set out here rather than left to be discovered in
+the code.**
+
+**What we decided before, and why.** A job is not a wizard. An assembler
+preparing one part's field may need another part's border first, may come back,
+may pack in between, and none of that finishes what they moved away from. So
+the card offered every item of work the job contained, side by side, with
+nothing coloured in, and the press WAS the choice. That was right about the
+workshop and it is still right about a job drawn as several parts.
+
+**What using it taught us.** Offering every valid destination shows an
+assembler the state machine rather than the job. On a job with three parts the
+card carried a dozen presses, most of them saying the same two words, and the
+question it answered best — "where could I go?" — is not the question someone
+at a bench is asking. The one they are asking is "what do I do now?", and the
+card made them work it out from a list.
+
+**What changes.** A job now runs one route, and the card shows the step in hand
+and the one press that moves it on:
+
+    Initial setup -> Field setup -> Field sheeting
+                  -> Border setup -> Border sheeting
+                  -> Packing -> Finish the job
+
+A lane the diagram does not have drops out of the route entirely, so a
+field-only job never sees a border and a border-only job never sees a field.
+Beside the forward press there is Pause, and only what genuinely belongs to the
+work in hand: Start cutting while sheeting, Set jig on a lane. A grey line under
+the buttons ticks off the steps already behind, because with no list of
+destinations there was otherwise nothing on the card saying how far along the
+job was.
+
+**What does not change, and this is the point.** Nothing underneath. The same
+segment ledger, the same setup measured apart from the sheeting, the same
+cutting contained inside the sheeting and never added on top of it, the same
+pause, the same audit, the same one timer per person across all their jobs, the
+same refusal when a stale card is pressed while another job is running. The
+engine stays exactly as flexible as it was; only what the card puts in front of
+the assembler is narrower.
+
+**And the old card is still here, unchanged.** `render_card` sends a job drawn
+as more than one part to `job_card` exactly as it was — a multi-part job has
+work the route cannot express, and the card that can show it is the one it
+keeps. The test is the job's own shape, so nothing had to be recorded anywhere
+and no existing job was migrated. Proven by comparing the old renderer's output
+before and after, block for block, across ten multi-part states.
+
+**The intake form is one screen.** Customer, invoice or pro forma, due date, and
+whether the job has a field, a border or both — a radio, because exactly one of
+those three is true and tick boxes let an assembler submit a job with neither.
+It no longer asks for a **job description**: what the job is is the diagram, and
+the box was being filled in with the customer's name again. It no longer asks
+**how many parts**, which was a question about how the tracker files the work
+rather than about the work. A job made here has one part, the assembler never
+sees it, and lane work is filed against it the way it always was.
+
+Moving to another stage of the same job — the "Switch work" idea — is not on
+this card. The logic that works it out is untouched and still in the file; it
+will come back later as ONE secondary press, rather than as a permanent grid.
+Moving to a different customer's job is unchanged and always was: pause this
+one, start or resume that one.
+
+**And Resume still means the ledger, not the route.** The route says what a job
+does in the ordinary case; it does not say what this assembler was doing when
+they stopped, and only one of those is a fact. Written the other way round
+first, the card put "Last on packing — 3s recorded" over a button offering to
+resume the field sheeting: the card contradicting its own history, and a press
+taking somebody somewhere they had not been. Whatever the ledger holds is what
+Resume offers, whether or not the route would have gone there next. The route
+answers only where the ledger has nothing to say — work nobody has started —
+and then the press reads "Start", because that is what it does. Found by the
+real-boundary proofs, which reach a job that has been packed mid-field; the
+card proof walks the route in order, where the two answers always agree, and
+could not have caught it.
+
+Agreed with Luis beforehand: no. This is workshop-originated, from using the
+rebuilt card. It changes no rule from the creator review — nothing auto-starts a
+timer except the handover the assembler submits, one person still times one
+thing at a time, and packing still only moves the job on when the assembler says
+so.
+
+LMSA side: `tracker.jobs.task_description` becomes nullable, so a job created
+without a description is recorded as having none rather than being given an
+invented one. Every description already stored is kept exactly as it is, the
+column stays, and no row is rewritten. The edit form keeps the box, optional, so
+a description a job already carries can still be read and corrected. Arrived in
+the single feature commit on `feature/linear-tracker-flow`.
+
 ## Known defect, deliberately not fixed: the export confirmation never fires
 
 Recorded here so it is not mistaken for hygiene debt. In `handle_export`, the
