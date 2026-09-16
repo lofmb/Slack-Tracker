@@ -505,11 +505,6 @@ def _part_ticks(task, part):
     )
 
 
-def other_work_buttons(task, already_offered=()):
-    """Every other-work button, flattened - for the callers that only count them."""
-    return [button for _, row in other_work_rows(task, already_offered) for button in row]
-
-
 def lane_needs_details(task, part, phase):
     """
     Whether this lane still has to be described before it can be worked.
@@ -2840,58 +2835,6 @@ def _new_job_metadata(metadata):
         except ValueError:
             return raw, None
     return raw, None
-
-
-@app.action("trk_job_lookup")
-def handle_job_lookup(ack, body, client):
-    """
-    Fill the New Job form from the Job Board entry the assembler picked.
-
-    Only what David has actually entered on that row is copied: his customer
-    and his paperwork number. The designs are NOT copied into this form - it
-    does not ask for them - but the row is remembered, so the lane forms can
-    offer his design later and the finished job goes back to his row rather
-    than starting a second one.
-
-    Which lanes the job has is left alone, deliberately. The board's designs
-    hint at it, but the assembler is holding the drawing and it is the one
-    answer on this form that cannot be got from anywhere else.
-    """
-    ack()
-    chosen = (body.get("actions") or [{}])[0].get("selected_option") or {}
-    invoice_no = (chosen.get("value") or "").strip()
-    view = body.get("view") or {}
-    if not invoice_no or not view.get("id"):
-        return
-
-    row = database.job_board_open_job(invoice_no)
-    if not row:
-        return
-
-    # Rebuild the form with the two fields filled in, keeping the rest as the
-    # assembler left it. The lookup itself keeps its selection so the choice
-    # they made is still on screen.
-    rebuilt = new_job_view(view.get("private_metadata") or "")
-    for block in rebuilt["blocks"]:
-        block_id = block.get("block_id")
-        if block_id == "customer_block":
-            block["element"]["initial_value"] = row.get("customer") or ""
-        elif block_id == "invoice_block":
-            block["element"]["initial_value"] = row.get("invoiceNo") or ""
-        elif block_id == "lookup_block":
-            block["accessory"]["initial_option"] = {
-                "text": {"type": "plain_text", "text": (row.get("customer") or "")[:75]},
-                "value": invoice_no,
-            }
-    # The row travels with the form so the finish knows which one to fill.
-    rebuilt["private_metadata"] = json.dumps({
-        "channel_id": view.get("private_metadata") or "",
-        "job_board_invoice": invoice_no,
-    })
-    try:
-        client.views_update(view_id=view["id"], view=rebuilt)
-    except Exception as err:  # noqa: BLE001
-        print("[tracker] could not prefill from the job board: %s" % err, flush=True)
 
 
 # Redrawing the New Job form without losing what has been typed.

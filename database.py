@@ -1622,23 +1622,6 @@ def job_board_open_job(invoice_no):
         return None
 
 
-def job_board_check_link(invoice_no, has_field, has_border):
-    """
-    Whether this job's shape agrees with that open row.
-
-    Asked while the job is being created, so a disagreement reaches the
-    assembler when they can still do something about it.
-    """
-    try:
-        return _call("POST", "/job-board/check-link", {
-            "invoiceNo": str(invoice_no),
-            "hasField": bool(has_field),
-            "hasBorder": bool(has_border),
-        })
-    except Exception:  # noqa: BLE001
-        return None
-
-
 def job_board_finish(payload):
     """
     The one write, at the end of the job.
