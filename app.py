@@ -3937,54 +3937,67 @@ def handle_notes_submission(ack, body, client):
     )
 
     # And now the Job Board, once, with the whole job known.
-    _write_to_job_board(task, user_id, client, dm_channel_id)
+    _write_to_job_board(task, user_id)
 
 
-def _write_to_job_board(task, user_id, client, dm_channel_id):
+def _write_to_job_board(task, user_id):
     """
-    Put the finished job on David's board.
+    Put the finished job on David's board. Silently.
 
     ONCE, here, rather than a little at each step: the workbook lives on a
     share he may have open, and a job paused overnight would otherwise leave a
     half-written row behind it.
 
+    NOTHING IS SAID TO THE ASSEMBLER ABOUT IT, either way. Which row of which
+    sheet a job landed on is not their business and not their journey - they
+    have finished the job and been told so, and a line about the Current sheet
+    is implementation showing through. A failure is not theirs to act on
+    either: they cannot open the workbook, cannot retry the write, and telling
+    them would only be asking them to carry somebody else's problem to the end
+    of their shift.
+
     A failure never fails the finish. The job IS finished and the Tracker holds
     the record; losing a completion because a file share was busy would be much
-    the worse outcome. The assembler is told quietly so somebody knows.
+    the worse outcome.
+
+    The outcome is RETURNED rather than announced, and logged. That is the
+    signal a private notification to David would be wired to later - when the
+    workbook was open, or a write failed - and it is deliberately dormant now:
+    nothing reads this return value yet.
     """
     if not database.job_board_enabled():
-        return
-    outcome = database.job_board_finish(_job_board_payload(task, user_id))
+        return {"state": "off"}
+
+    try:
+        outcome = database.job_board_finish(_job_board_payload(task, user_id))
+    except Exception as err:  # noqa: BLE001
+        # Logged in full. The board is behind by one job and somebody needs to
+        # be able to find out which one, which is what the job number is for.
+        print("[tracker] job board write failed for T-%s: %s"
+              % (task.get("task_id"), err), flush=True)
+        return {"state": "failed", "error": str(err), "task_id": task.get("task_id")}
+
     if outcome is None:
-        _quiet_note(client, dm_channel_id, task,
-                    "The job is finished and recorded. The Job Board could not be "
-                    "updated just now - it can be brought up to date later.")
-        return
+        print("[tracker] job board write returned nothing for T-%s"
+              % task.get("task_id"), flush=True)
+        return {"state": "failed", "error": "no outcome", "task_id": task.get("task_id")}
+
     wrote = outcome.get("wrote")
     if wrote == "nothing":
-        # Cancelled and several-part jobs land here by design, and so does a
-        # row that already holds everything. Saying which keeps it honest.
-        _quiet_note(client, dm_channel_id, task,
-                    "Nothing was written to the Job Board: %s." % outcome.get("because", "no reason given"))
-    elif wrote in ("updated", "created"):
-        where = "updated row %s of" % outcome["row"] if wrote == "updated" else "added row %s to" % outcome["row"]
-        note = "Job Board %s the Current sheet, under invoice %s." % (where, outcome.get("invoiceNo", ""))
-        # A new row where an open one already existed is a DECISION, not an
-        # accident: the board's row disagreed about what the job is made of, so
-        # it was left for David rather than filled in over the top. Saying so
-        # is the difference between a considered refusal and a duplicate.
-        if outcome.get("conflict"):
-            note += " An open row for that number was left alone: %s." % outcome["conflict"]
-        _quiet_note(client, dm_channel_id, task, note)
+        # Cancelled and several-part jobs land here BY DESIGN, and so does a row
+        # that already holds everything. Not a failure, and not silence either:
+        # the reason is recorded so a question about a missing row has an answer.
+        print("[tracker] job board wrote nothing for T-%s: %s"
+              % (task.get("task_id"), outcome.get("because", "no reason given")), flush=True)
+    else:
+        print("[tracker] job board %s row %s for T-%s under invoice %s%s"
+              % (wrote, outcome.get("row"), task.get("task_id"),
+                 outcome.get("invoiceNo", ""),
+                 (" (an open row was left alone: %s)" % outcome["conflict"])
+                 if outcome.get("conflict") else ""), flush=True)
 
+    return {"state": "written", "outcome": outcome, "task_id": task.get("task_id")}
 
-def _quiet_note(client, channel_id, task, text):
-    """A line in the assembler's own DM. Never the workshop channel."""
-    try:
-        client.chat_postMessage(channel=channel_id, text=text,
-                                thread_ts=task.get("message_ts"))
-    except Exception as err:  # noqa: BLE001
-        print("[tracker] could not post the job board note: %s" % err, flush=True)
 
 
 def _as_number(value):
