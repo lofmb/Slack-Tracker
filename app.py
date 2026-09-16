@@ -617,8 +617,13 @@ def resume_target(task):
 # Slack's ceiling for a header block's text.
 HEADER_LIMIT = 150
 
+# How much of the job's name a notification line carries. Not a Slack
+# limit - a readability one: this is what a phone shows on the lock
+# screen, and the stage the job is at has to fit beside it.
+NOTIFICATION_LABEL_LIMIT = 60
 
-def job_label(task):
+
+def job_label(task, limit=None):
     """
     The job as the WORKSHOP knows it: the customer, and the number on the paperwork.
 
@@ -635,6 +640,14 @@ def job_label(task):
     """
     customer = (task.get("customer_name") or "").strip()
     invoice = str(task.get("invoice_number") or "").strip()
+    # A limit trims the CUSTOMER and never the invoice: the number is short,
+    # exact, and the half of the label that identifies the job on its own. A
+    # notification line is all a phone shows, and a customer with a very long
+    # trading name would otherwise fill it on their own.
+    if limit is not None and customer:
+        room = limit - (len("  ·  INV ") + len(invoice) if invoice else 0)
+        if len(customer) > room:
+            customer = customer[: max(room - 1, 0)].rstrip() + "…"
     if customer and invoice:
         return "%s  ·  INV %s" % (customer, invoice)
     if customer:
@@ -2190,9 +2203,10 @@ def linear_card(task, note=None, expanded=False):
 
     here = task.get("working_on") or {}
     if not here:
-        summary = job_label(task) + ": paused"
+        summary = job_label(task, limit=NOTIFICATION_LABEL_LIMIT) + ": paused"
     else:
-        summary = job_label(task) + ": " + _stage_name(here["phase"], here["activity"])
+        summary = (job_label(task, limit=NOTIFICATION_LABEL_LIMIT) + ": "
+                   + _stage_name(here["phase"], here["activity"]))
     return summary, blocks
 
 
