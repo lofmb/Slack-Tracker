@@ -1238,9 +1238,9 @@ def finished_card(task, user_id=None):
         blocks.append({"type": "section",
                        "text": {"type": "mrkdwn", "text": "\n".join(lanes)}})
 
-    # What the assembler wrote on the way out. The old card asked for both and
-    # then showed neither back, which is the surest way to teach somebody not
-    # to bother filling the boxes in.
+    # What the assembler wrote on the way out, shown back to them. Anything the
+    # card asks for and never displays again teaches people not to bother
+    # filling the boxes in.
     for label, value in (("Notes", task.get("general_notes")),
                          ("What went wrong", task.get("issues_encountered"))):
         said = (value or "").strip()
@@ -1773,9 +1773,8 @@ def linear_secondary(task):
     What More opens: the actions that are real right now, and nothing else.
 
     These are all things an assembler sometimes needs and rarely needs. On the
-    card they competed with the one press that moves the job on, which is the
-    clutter the live acceptance run found. Underneath More they keep every bit
-    of their behaviour - Cancel still carries its own confirmation, the jig
+    card they competed with the one press that moves the job on. Underneath
+    More they keep every bit of their behaviour - Cancel still carries its own confirmation, the jig
     still opens its form - while the card that gets read a hundred times a day
     says only what is happening and what to press.
 
@@ -1903,20 +1902,20 @@ def pause_choice_view(task, channel_id):
     """
     The form behind Pause: how long are you away?
 
-    Pause used to be one press that stopped the timer and said nothing more.
-    The timing was right and the card was silent - a job sitting paused at
-    12:30 read exactly like a job abandoned on Friday afternoon, and the only
-    person who knew the difference was the assembler who was not there to ask.
+    A pause that only stopped the timer would time the job correctly and still
+    leave the card silent: a job paused at 12:30 reads exactly like a job
+    abandoned on Friday afternoon, and the only person who can tell the
+    difference is the assembler who is not there to be asked.
 
     So the press now asks. Every answer does the SAME thing to the ledger -
-    stops what is running, changes nothing else - and the answer is used for
-    one purpose: the card says when they expect to be back. It is a note for
-    whoever reads the job next, including the assembler themselves.
+    stops what is running, changes nothing else - and the answer is then used
+    for two things: the card says when they expect to be back, and a break with
+    a set length brings the job back on its own when it runs out.
 
-    NOTHING RESUMES ON ITS OWN. A time on the card is what somebody said, not
-    a promise the tracker made: the assembler presses Resume when they are
-    actually at the bench, exactly as before. See handle_pause_submission for
-    why that is the design rather than the shortfall.
+    A LENGTH IS A PROMISE THE TRACKER KEEPS; "no set time" is not. Either
+    lunch, or a length they typed, resumes the job when it expires. No set time
+    means nobody has said when they will be back, so the job waits for Resume.
+    See handle_pause_submission for what the resume is still not allowed to do.
     """
     here = task.get("working_on") or {}
     doing = (lower_name(_stage_name(here.get("phase"), here.get("activity")))
@@ -2312,14 +2311,18 @@ def busy_elsewhere_text(active):
     DIFFERENT job of theirs is being timed: which job it is, and that Pause on
     that job is what frees them. Nothing is switched or paused on their behalf.
 
+    The job is named the way the workshop knows it - see job_label. Someone
+    being turned away from a press has to recognise the job they are being sent
+    back to, and they have never met the tracker's own number for it.
+
     `active` is the job being timed, as get_active_task returns it - read
-    fresh, so the number is the job that is timing NOW rather than the one a
-    stale card last knew about. None means it stopped in the meantime.
+    fresh, so it is the job timing NOW rather than the one a stale card last
+    knew about. None means it stopped in the meantime.
     """
     if active:
         return (
-            "You're already working on T-" + str(active["task_id"]) + " "
-            + active["customer_name"] + ". Pause that job before starting this one."
+            "You're already working on " + job_label(active)
+            + ". Pause that job before starting this one."
         )
     return "You're already working on another job. Pause that one before starting this."
 
@@ -3150,11 +3153,11 @@ def handle_start(ack, body, client):
     if part is None and phase in ("field_sheeting", "border_sheeting"):
         part = task.get("current_part")
 
-    # THE CLOCK STARTS FIRST, AND THEN THE FORM OPENS. It used to be the other
-    # way round, which meant an assembler who pressed Start and then spent a
-    # minute reading the drawing to answer "which design?" spent that minute
-    # untimed - and an assembler who closed the form had not started at all,
-    # despite having pressed Start. Finding and describing the lane IS the
+    # THE CLOCK STARTS FIRST, AND THEN THE FORM OPENS. Opening the form first
+    # would leave an assembler who spent a minute reading the drawing to answer
+    # "which design?" untimed for that minute, and would leave one who closed
+    # the form not started at all despite having pressed Start. Finding and
+    # describing the lane IS the
     # setup; it is the work, so it is timed as the work.
     outcome = database.start_work(task_id, phase, activity, part=part)
     if outcome != "started":
@@ -3487,15 +3490,16 @@ def handle_pause_submission(ack, body, client):
     enforced where it always was. The length of the break is not work and is
     not written against the job as though it were.
 
-    NOTHING RESUMES ON ITS OWN, and that is a decision rather than an omission.
-    A timed auto-resume needs a clock inside this process that outlives the
-    request that set it - and then it needs to answer what happens when it
-    fires while the assembler is timing a DIFFERENT job, which the one-timer
-    rule forbids, or has gone home, or has already resumed by hand. A timer
-    that quietly starts accruing against a job nobody is stood at produces
-    exactly the wrong thing: recorded hours no one worked. So the card carries
-    what the assembler said, the assembler presses Resume, and the ledger only
-    ever holds time somebody was actually at the bench for.
+    A SET LENGTH RESUMES THE JOB BY ITSELF; "no set time" waits for Resume.
+    The length is stored against the job and a clock outside this process picks
+    it up when it falls due - see resume_due_jobs. A pause with no length has
+    nothing to fall due.
+
+    THE ONE-TIMER RULE IS NOT RELAXED FOR THAT RESUME. If the assembler is
+    timing a different job when the break runs out, the resume is dropped
+    rather than taken: the job stays paused and theirs, and the card says so.
+    A timer that began accruing against a job nobody is stood at would produce
+    the one thing the ledger must never hold - recorded hours no one worked.
     """
     vals = body["view"]["state"]["values"]
     meta = json.loads(body["view"]["private_metadata"])
@@ -3532,10 +3536,11 @@ def resume_due_jobs(client):
     """
     Start again the jobs whose set-time pause has run out.
 
-    Called on a timer by the launcher, NOT by anything in this module - a
-    thread started at import would run inside every proof and every one-off
-    script that reads this file. The launcher lives outside the vendored tree
-    for exactly this kind of reason.
+    Called on a timer by the launcher, NOT by anything in this module.
+    IMPORTING THIS FILE MUST NEVER START A CLOCK: it is imported by tools that
+    only mean to read it, and a thread started at import would have them
+    quietly resuming real jobs behind whoever ran them. Scheduling belongs to
+    the launcher, outside the vendored tree.
 
     THE ONE-TIMER RULE IS NOT RELAXED FOR THIS. An assembler who is already
     timing something else at the moment their lunch runs out is not moved off
@@ -4337,8 +4342,9 @@ def handle_delete(ack, body, client):
 
     # The card is replaced by what actually happened. Nothing is destroyed -
     # LMSA cancels the job and keeps it, which is exactly why an assembler may safely
-    # use this on a job that turned out to be a mistake. Saying "deleted" here
-    # contradicted the dialog they had just agreed to, one press earlier.
+    # use this on a job that turned out to be a mistake. The wording has to
+    # match the dialog they agreed to one press earlier: "deleted" would
+    # contradict it.
     client.chat_update(
         channel=channel_id,
         ts=task["message_ts"],

@@ -596,9 +596,8 @@ def _row(view, timing):
         "parts": part_rows,
         "part_count": len(part_rows),
         # THE OPENING PREPARATION, which belongs to the job and not to a lane.
-        # It used to be recorded against whichever lane came first, because
-        # that was the only place to put it - which made a border-only job's
-        # preparation look like field work.
+        # Recording it against whichever lane came first would make a
+        # border-only job's preparation read as field work.
         "job_setup_elapsed": int((timing or {}).get("jobSetupSeconds") or 0),
         # Single-part compatibility, as above.
         "field_design": field.get("design"),
@@ -1130,11 +1129,10 @@ def set_lane_details(task_id, phase, design, difficulty, jig=None, part=None):
     Record what one lane on one part IS - its design, its difficulty, and the
     jig when the assembler already knows it.
 
-    Asked on first entry to that lane, which is the moment the assembler is looking
-    at that part of the diagram. It used to be asked of the border only, in a
-    form reached by finishing the field; every lane is described the same way
-    now, and the part is named because a job drawn as three parts has three
-    borders and they are not the same border.
+    Asked on first entry to that lane, which is the moment the assembler is
+    looking at that part of the diagram. EVERY LANE IS DESCRIBED THE SAME WAY,
+    and the part is named with it: a job drawn as three parts has three borders
+    and they are not the same border.
 
     Records the details and NOTHING else. It does not start the work and does
     not move the job's cursor: the caller starts what the assembler pressed for,
