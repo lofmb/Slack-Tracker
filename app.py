@@ -618,21 +618,43 @@ def resume_target(task):
 HEADER_LIMIT = 150
 
 
+def job_label(task):
+    """
+    The job as the WORKSHOP knows it: the customer, and the number on the paperwork.
+
+    Not the tracker's own T-number. That is a database identity and it stays
+    one - it is in the logs, in the export and in every diagnostic, and it is
+    how a job is found when something needs explaining - but an assembler has
+    never met it. They know the job as whose floor it is and which invoice it
+    is against, which is what they were handed and what they will be asked
+    about.
+
+    A job with no invoice yet shows the customer alone rather than an invented
+    number; a job with neither is described rather than labelled, because a
+    blank heading is worse than a plain one.
+    """
+    customer = (task.get("customer_name") or "").strip()
+    invoice = str(task.get("invoice_number") or "").strip()
+    if customer and invoice:
+        return "%s  ·  INV %s" % (customer, invoice)
+    if customer:
+        return customer
+    return ("INV %s" % invoice) if invoice else "this job"
+
+
 def header_text(task, suffix=""):
     """
-    "T-12  Customer Name", trimmed to something Slack will accept.
+    "Customer Name  ·  INV 27624", trimmed to something Slack will accept.
 
-    The job number and any suffix are never what gets cut: they are how an assembler
-    finds the card. This heads the CLOSED card, where the job is what the card
-    is about; a card still being worked heads with the work instead and carries
-    the customer's full name in its foot.
+    The suffix is never what gets cut. This heads the CLOSED card, where the
+    job is what the card is about; a card still being worked heads with the
+    work instead and carries the same identity in its foot.
     """
-    prefix = "T-" + str(task["task_id"]) + "  "
-    room = HEADER_LIMIT - len(prefix) - len(suffix)
-    name = task["customer_name"] or ""
-    if len(name) > room:
-        name = name[: max(room - 1, 0)].rstrip() + "…"
-    return prefix + name + suffix
+    label = job_label(task)
+    room = HEADER_LIMIT - len(suffix)
+    if len(label) > room:
+        label = label[: max(room - 1, 0)].rstrip() + "…"
+    return label + suffix
 
 
 def _button(text, action_id, value, style=None, confirm=None):
@@ -1226,7 +1248,7 @@ def finished_card(task, user_id=None):
                      "text": "*" + label + "*\n>" + said.replace("\n", "\n>")},
         })
 
-    return "T-%s is finished." % task["task_id"], blocks
+    return "%s - finished." % job_label(task), blocks
 
 
 def _headline(task, linear=False):
@@ -1358,7 +1380,7 @@ def _parts_finished(task):
     return (done, len(rows)) if done else None
 
 
-def _foot_lines(task):
+def _foot_lines(task, linear=False):
     """
     Which job this is, in grey, at the bottom. Two lines, read once.
 
@@ -1368,8 +1390,13 @@ def _foot_lines(task):
     cut.
     """
     here = task.get("working_on") or {}
+    # THE LINEAR CARD names the job the way the workshop does - the customer
+    # and the invoice, which is what the assembler was handed. The legacy card
+    # is frozen and keeps the tracker's own number, because changing a card
+    # nobody asked to change is how a freeze stops meaning anything.
     first = "  ·  ".join(str(bit) for bit in (
-        "T-" + str(task["task_id"]),
+        () if linear else ("T-" + str(task["task_id"]),)
+    ) + (
         task["customer_name"],
         task["task_description"],
     ) if bit)
@@ -2158,14 +2185,14 @@ def linear_card(task, note=None, expanded=False):
 
     blocks.append({
         "type": "context",
-        "elements": [{"type": "mrkdwn", "text": "\n".join(_foot_lines(task))}],
+        "elements": [{"type": "mrkdwn", "text": "\n".join(_foot_lines(task, linear=True))}],
     })
 
     here = task.get("working_on") or {}
     if not here:
-        summary = "T-" + str(task_id) + ": paused"
+        summary = job_label(task) + ": paused"
     else:
-        summary = "T-" + str(task_id) + ": " + _stage_name(here["phase"], here["activity"])
+        summary = job_label(task) + ": " + _stage_name(here["phase"], here["activity"])
     return summary, blocks
 
 
@@ -2264,7 +2291,7 @@ def resolve_job(client, body, task_id, user_id, channel_id):
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text="T-" + str(task_id) + " is finished, so nothing more can be recorded on it.",
+            text=job_label(task) + " is finished, so nothing more can be recorded on it.",
         )
         return None
     return task
@@ -3108,7 +3135,7 @@ def handle_new_job(ack, body, client):
     # channel never hears about it.
     client.chat_postMessage(
         channel=team_channel_id,
-        text=f"{MARK_RUNNING} <@{user_id}> has started T-{task_id} {task['customer_name']}",
+        text=f"{MARK_RUNNING} <@{user_id}> has started {job_label(task)}",
     )
 
 
@@ -3593,8 +3620,8 @@ def resume_due_jobs(client):
             if channel_id:
                 update_card(client, task, channel_id, note=(
                     "*This job did not resume on its own.* You were working on "
-                    "T-%s at the time, so it is still paused and waiting for you."
-                    % busy["task_id"]))
+                    "%s at the time, so it is still paused and waiting for you."
+                    % job_label(busy)))
             done.append((task_id, "busy on T-%s" % busy["task_id"]))
             continue
 
@@ -3816,7 +3843,7 @@ def handle_complete(ack, body, client):
         if not job_is_finishable(task):
             client.chat_postEphemeral(
                 channel=channel_id, user=user_id,
-                text=("T-" + str(task_id) + " still has work on it. Finish each part's work "
+                text=(job_label(task) + " still has work on it. Finish each part's work "
                       "first, then the job."),
             )
             return
@@ -3933,7 +3960,7 @@ def handle_notes_submission(ack, body, client):
     # the same breakdown on their own card.
     client.chat_postMessage(
         channel=team_channel_id,
-        text=f"{MARK_FINISHED} <@{user_id}> has finished T-{task_id} {task['customer_name']}",
+        text=f"{MARK_FINISHED} <@{user_id}> has finished {job_label(task)}",
     )
 
     # And now the Job Board, once, with the whole job known.
@@ -4358,13 +4385,13 @@ def handle_delete(ack, body, client):
     client.chat_update(
         channel=channel_id,
         ts=task["message_ts"],
-        text=f"Job T-{task_id} was cancelled by <@{user_id}>. Its recorded time was kept.",
+        text=f"{job_label(task)} - cancelled by <@{user_id}>. Its recorded time was kept.",
         blocks=[
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": (f"*Job T-{task_id} was cancelled by <@{user_id}>.*"
+                    "text": (f"*{job_label(task)} - cancelled by <@{user_id}>.*"
                              "\nIts recorded time and history have been kept.")
                 }
             }
