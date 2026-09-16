@@ -663,6 +663,7 @@ def _row(view, timing):
             if last_segment
             else None
         ),
+        "packing_boxes": job.get("packingBoxes"),
         "general_notes": job.get("generalNotes"),
         "issues_encountered": job.get("issuesEncountered"),
         "status": _legacy_status(job, phases, open_segment),
@@ -672,6 +673,14 @@ def _row(view, timing):
         "message_ts": job.get("cardMessageTs"),
         "dm_channel_id": job.get("dmChannelId"),
         "total_elapsed": int((timing or {}).get("totalSeconds") or 0),
+        # WHERE EACH PHASE BEGAN AND ENDED, and how long the job sat paused.
+        # Neither can be derived from the totals: a phase that was paused spans
+        # more clock time than it worked. Carried as the API gives them - ISO
+        # instants and whole seconds - so nothing is reinterpreted on the way.
+        "phase_boundaries": (timing or {}).get("phaseBoundaries") or {},
+        "first_started_at": (timing or {}).get("firstStartedAt"),
+        "paused_elapsed": int((timing or {}).get("pausedSeconds") or 0),
+        "completed_at": job.get("completedAt"),
     }
 
 
@@ -1301,6 +1310,26 @@ def get_phase_elapsed(task_id):
         "packing_elapsed": row["packing_elapsed"],
         "total_elapsed": row["total_elapsed"],
     }
+
+
+def set_packing_boxes(task_id, boxes):
+    """
+    Record how many boxes the job was packed into.
+
+    Its own call, made before packing is finished rather than as part of
+    finishing it: the handoff between phases is one atomic move, and a failure
+    to record a box count must not be able to cost the assembler a completion
+    they have already done.
+    """
+    resolved = _row_for(task_id)
+    if resolved is None:
+        return
+    view, row = resolved
+    text = (boxes or "").strip() or None
+    _call("POST", f"/jobs/{view['job']['id']}/packing-boxes", {
+        "boxes": text,
+        "actor": f"slack:{row['user_id']}",
+    }, operation="set_packing_boxes")
 
 
 def set_auto_resume(task_id, minutes):

@@ -739,6 +739,18 @@ def _finish_button(task, part, phase, style=None):
     # on the card does not repeat it. The confirmation still names the lane in
     # full, which is where an assembler about to close something for good reads it.
     label = FINISH_LABELS[phase]
+    # PACKING ASKS ONE THING FIRST. The board keeps a box count and the only
+    # person who knows it is the one who has just finished packing; a minute
+    # later they are on another job. So packing's forward press opens a small
+    # form that both confirms and asks, rather than a confirmation followed by
+    # a second dialog - it is the same one screen either way.
+    if phase == "packing":
+        return _button(
+            label,
+            "trk_finish_packing",
+            work_value(task["task_id"], part, phase, "production"),
+            style=style,
+        )
     return _button(
         label,
         "trk_complete_task",
@@ -3701,6 +3713,91 @@ def _completed_as(outcome):
     return "advanced" if outcome == "completed" else outcome
 
 
+def packing_finish_view(task, work, channel_id):
+    """
+    The one question packing is asked, and the confirmation in the same screen.
+    """
+    return {
+        "type": "modal",
+        "callback_id": "trk_packing_modal",
+        "private_metadata": json.dumps({"work": work, "dm_channel_id": channel_id}),
+        "title": {"type": "plain_text", "text": "Packing finished"},
+        "submit": {"type": "plain_text", "text": "Finish packing"},
+        "close": {"type": "plain_text", "text": "Not yet"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": ("*This closes packing for good.*\n\nStill something to do on it? "
+                             "Close this and use Pause instead - that leaves it unfinished and "
+                             "you can come back."),
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "boxes_block",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Number of boxes"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "boxes",
+                    "initial_value": (task.get("packing_boxes") or ""),
+                    "placeholder": {"type": "plain_text", "text": "e.g. 12, or 10 + 3"},
+                },
+                # However the workshop counts them. The board's own history has
+                # "10 + 3" in it, so this is never forced into a single number.
+                "hint": {"type": "plain_text", "text": "However you count them. Leave blank if you are not sure."},
+            },
+        ],
+    }
+
+
+@app.action("trk_finish_packing")
+def handle_finish_packing(ack, body, client):
+    """Ask for the box count, then finish packing exactly as any lane finishes."""
+    ack()
+    work = body["actions"][0]["value"]
+    task_id, _part, _phase, _activity = read_work_value(work)
+    user_id = body["user"]["id"]
+    channel_id = body["container"]["channel_id"]
+
+    task = resolve_job(client, body, task_id, user_id, channel_id)
+    if task is None:
+        return
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view=packing_finish_view(task, work, channel_id),
+    )
+
+
+@app.view("trk_packing_modal")
+def handle_packing_submission(ack, body, client):
+    """
+    Record the boxes, then close packing.
+
+    In that order, and not in one step: the box count is a fact about the job
+    and finishing the phase is a move in the workflow. If recording the count
+    fails, the assembler has still finished packing - they are not asked to do
+    it again because a text field would not save.
+    """
+    ack()
+    meta = json.loads(body["view"].get("private_metadata") or "{}")
+    work = meta.get("work") or ""
+    channel_id = meta.get("dm_channel_id")
+    user_id = body["user"]["id"]
+    task_id, part, phase, _activity = read_work_value(work)
+
+    boxes = _typed(body["view"]["state"]["values"], "boxes_block", "boxes")
+    if boxes.strip():
+        try:
+            database.set_packing_boxes(task_id, boxes)
+        except Exception as err:  # noqa: BLE001
+            print("[tracker] could not record the box count: %s" % err, flush=True)
+
+    _complete_work(client, task_id, part, phase, user_id, channel_id, trigger_id=None)
+
+
 @app.action("trk_complete_task")
 def handle_complete(ack, body, client):
     """Finish one lane, or - when the job is done - open the closing notes."""
@@ -3737,6 +3834,22 @@ def handle_complete(ack, body, client):
         )
         return
 
+    _complete_work(client, task_id, part, phase, user_id, channel_id,
+                   trigger_id=body["trigger_id"])
+
+
+def _complete_work(client, task_id, part, phase, user_id, channel_id, trigger_id=None):
+    """
+    Finish one lane and hand the clock to whatever follows it.
+
+    Shared by the ordinary forward press and by packing's own form, so the two
+    cannot drift: the box count is the only thing packing does differently, and
+    it is done before this is called.
+    """
+    task = database.get_task(task_id)
+    if task is None:
+        return
+
     # WHAT FOLLOWS THIS LANE, decided here rather than by the database, because
     # the route through a job is the card's business: a job with no border goes
     # from its field straight to packing, and nothing outside this file knows
@@ -3769,11 +3882,15 @@ def handle_complete(ack, body, client):
     # described this form is the assembler recording what they are looking at -
     # not a gate they must pass before the clock will start. Filling it in IS
     # part of doing the setup, and it is timed as such.
-    if following is not None:
+    #
+    # Only from a press that HAS a trigger. Packing's form has already used
+    # this interaction's trigger to open itself, and packing is the last lane
+    # anyway - there is no following setup to describe.
+    if following is not None and trigger_id is not None:
         next_part, next_phase, next_activity = following
         if next_activity == "setup" and lane_needs_details(task, next_part, next_phase):
             client.views_open(
-                trigger_id=body["trigger_id"],
+                trigger_id=trigger_id,
                 view=lane_details_view(task, next_part, next_phase, next_activity, channel_id),
             )
 
@@ -3896,8 +4013,7 @@ def _lane_payload(task, phase):
     lane = lane_of(task, part, phase)
     if not lane.get("present", True):
         return None
-    seconds = work_elapsed(task, part, phase, "production") or 0
-    setup = work_elapsed(task, part, phase, "setup") or 0
+
     payload = {}
     if lane.get("design"):
         payload["designName"] = lane["design"]
@@ -3919,29 +4035,79 @@ def _lane_payload(task, phase):
     first = (records[0] or {}).get("value") if records else None
     if first is not None and str(first).strip():
         payload["jigSize"] = str(first).strip()
-    total = (seconds + setup) / 3600.0
-    if total:
-        payload["totalHours"] = round(total, 3)
+
+    # SECONDS, exactly as the ledger has them. The board's columns are a
+    # projection - each lane's sheeting has its own cutting taken out before
+    # anything is rounded - and that arithmetic belongs on the LMSA side where
+    # one function owns the convention. Rounding here would round twice.
+    payload["sheetingSeconds"] = int(work_elapsed(task, part, phase, "production") or 0)
+    payload["setupSeconds"] = int(work_elapsed(task, part, phase, "setup") or 0)
+    payload["cuttingSeconds"] = int(lane.get("cutting_elapsed") or 0)
+
+    # The FIRST start and the LAST stop of this lane's sheeting. Not derivable
+    # from the totals: a lane that was paused spans more than it worked.
+    bounds = (task.get("phase_boundaries") or {}).get(phase) or {}
+    if bounds.get("firstStartedAt"):
+        payload["startedAt"] = bounds["firstStartedAt"]
+    if bounds.get("lastStoppedAt"):
+        payload["finishedAt"] = bounds["lastStoppedAt"]
+
     return payload or None
 
 
 def _job_board_payload(task, user_id):
     """Everything the Job Board write needs, from the finished job."""
-    packing_seconds = work_elapsed(task, None, "packing", "production") or 0
-    return {
+    packing_bounds = (task.get("phase_boundaries") or {}).get("packing") or {}
+    packing_seconds = int(work_elapsed(task, None, "packing", "production") or 0)
+    packing = None
+    if packing_seconds or packing_bounds or task.get("packing_boxes"):
+        packing = {"activeSeconds": packing_seconds}
+        if packing_bounds.get("firstStartedAt"):
+            packing["startedAt"] = packing_bounds["firstStartedAt"]
+        if packing_bounds.get("lastStoppedAt"):
+            packing["finishedAt"] = packing_bounds["lastStoppedAt"]
+        # However the workshop counts them: "12", or "10 + 3". Never coerced
+        # to a number, because the sheet's own history is not all integers.
+        boxes = (task.get("packing_boxes") or "").strip()
+        if boxes:
+            packing["boxes"] = boxes
+
+    payload = {
         "customer": task.get("customer_name") or "",
         "enteredNumber": str(task.get("invoice_number") or "").strip(),
         "assembledBy": task.get("assembled_by") or user_id,
         "field": _lane_payload(task, "field_sheeting"),
         "border": _lane_payload(task, "border_sheeting"),
-        "packing": {"totalHours": round(packing_seconds / 3600.0, 3)} if packing_seconds else None,
+        "packing": packing,
         # The job's own due date, through the same reader the card uses.
         # due_date_text is not a key any task carries, so this was always
         # blank and Estimated Completion Date was never written.
         "dueDate": due_date_supplied(task) or "",
+        # The opening preparation, which belongs to the job and not to a lane.
+        "jobSetupSeconds": int(task.get("job_setup_elapsed") or 0),
+        # Not work, and reported in its own column rather than inside any total.
+        "pausedSeconds": int(task.get("paused_elapsed") or 0),
+        # The Tracker's own total of active work. The board rounds THIS once,
+        # rather than adding up columns that have each been rounded already.
+        "totalActiveSeconds": int(task.get("total_elapsed") or 0),
         "cancelled": task.get("status") == "cancelled",
         "partCount": task.get("part_count") or 1,
     }
+    if task.get("first_started_at"):
+        payload["handedToAssemblerAt"] = task["first_started_at"]
+    if task.get("completed_at"):
+        payload["actualCompletionAt"] = task["completed_at"]
+    # What the assembler wrote at the finish. The form stores the literal word
+    # "None" for a box left empty - a habit older than this card - so that is
+    # not a note either.
+    said = []
+    for value in (task.get("general_notes"), task.get("issues_encountered")):
+        text = (value or "").strip()
+        if text and text.lower() != "none":
+            said.append(text)
+    if said:
+        payload["notes"] = " / ".join(said)
+    return payload
 
 
 # ---------------------------------------------------------------------------
