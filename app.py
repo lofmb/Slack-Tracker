@@ -4044,9 +4044,12 @@ def _lane_payload(task, phase):
     payload["setupSeconds"] = int(work_elapsed(task, part, phase, "setup") or 0)
     payload["cuttingSeconds"] = int(lane.get("cutting_elapsed") or 0)
 
-    # The FIRST start and the LAST stop of this lane's sheeting. Not derivable
-    # from the totals: a lane that was paused spans more than it worked.
-    bounds = (task.get("phase_boundaries") or {}).get(phase) or {}
+    # The FIRST start and the LAST stop of this lane's SHEETING. Not derivable
+    # from the totals: a lane that was paused spans more than it worked. And
+    # keyed by activity, because the lane's setup is the same phase - asking
+    # for the phase gives the moment the lane was first touched, which is when
+    # its setup began, three quarters of an hour earlier on a real job.
+    bounds = (task.get("activity_boundaries") or {}).get(phase + "/production") or {}
     if bounds.get("firstStartedAt"):
         payload["startedAt"] = bounds["firstStartedAt"]
     if bounds.get("lastStoppedAt"):
@@ -4057,7 +4060,7 @@ def _lane_payload(task, phase):
 
 def _job_board_payload(task, user_id):
     """Everything the Job Board write needs, from the finished job."""
-    packing_bounds = (task.get("phase_boundaries") or {}).get("packing") or {}
+    packing_bounds = (task.get("activity_boundaries") or {}).get("packing/production") or {}
     packing_seconds = int(work_elapsed(task, None, "packing", "production") or 0)
     packing = None
     if packing_seconds or packing_bounds or task.get("packing_boxes"):

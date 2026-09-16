@@ -678,6 +678,12 @@ def _row(view, timing):
         # more clock time than it worked. Carried as the API gives them - ISO
         # instants and whole seconds - so nothing is reinterpreted on the way.
         "phase_boundaries": (timing or {}).get("phaseBoundaries") or {},
+        # The same, split by activity. A lane's setup and its sheeting are one
+        # PHASE, so the phase-wide boundary says when the lane was first
+        # touched - which is the start of its setup. The board asks when the
+        # sheeting began, and on a real job those are three quarters of an hour
+        # apart.
+        "activity_boundaries": (timing or {}).get("phaseActivityBoundaries") or {},
         "first_started_at": (timing or {}).get("firstStartedAt"),
         "paused_elapsed": int((timing or {}).get("pausedSeconds") or 0),
         "completed_at": job.get("completedAt"),
