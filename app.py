@@ -2387,6 +2387,16 @@ def refusal_text(reason, task, phase=None):
             "what this job is up to and what you can start."
         ),
         "job_not_open": "This job is no longer open, so nothing has been changed.",
+        # The workshop day. Time is only counted between 09:00 and 18:30, so a
+        # timer cannot be started outside those hours - otherwise a job started
+        # on the way out would accrue the whole night. Nothing is stopped or
+        # lost by this: the job stays exactly as it was, ready in the morning.
+        # Said with the hours in it, because "that could not be done" leaves an
+        # assembler pressing the same button wondering what is broken.
+        "outside_working_hours": (
+            "Tracker working hours are 09:00 to 18:30, so the timer has not been started. "
+            "The job is unchanged - pick it up in the morning."
+        ),
         # The handoff. Finishing a lane hands the clock straight to the next
         # work, so these say what went wrong with WHERE IT WAS GOING - and they
         # all end the same way, because the card the assembler is holding is
