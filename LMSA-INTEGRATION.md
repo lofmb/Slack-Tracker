@@ -6,6 +6,43 @@ tracker, made to work inside LMSA" and "new features added afterwards".
 
 It lives on `feature/lmsa-integration` only. It is not on `main`.
 
+## Where V1 stands
+
+What an assembler does, in the order they do it:
+
+- **Start a job.** One form. The customer name and the invoice or pro forma
+  number are looked up against LMSA's Job Board as they type: picking a match
+  fills in the customer, the invoice and the due date, and anything unrecognised
+  is typed in by hand as before. A pro forma becomes an invoice only through a
+  confirmed link, never a guess.
+- **One route through the job.** The card shows the step in hand and the single
+  press that moves it on. Field and Border each have setup and sheeting, with
+  cutting recorded inside the sheeting it happened in; the opening preparation
+  belongs to the job rather than to either lane. Actions that are needed rarely
+  live under More.
+- **Pause.** The press asks how long. A set length brings the job back by
+  itself; "no set time" waits for Resume. One assembler times one job at a time,
+  and an expiring break never moves somebody off the job they are stood at.
+- **Packing and finish.** Packing is started by hand, the number of boxes is
+  recorded the way the workshop counts them, and the job is finished from the
+  card.
+
+A job is named, everywhere an assembler sees it, by CUSTOMER and INVOICE - never
+by the tracker's own number. That number stays the database identity and stays
+in the logs, the export and every diagnostic.
+
+**The Job Board.** When a job finishes, LMSA projects it onto the Current Job
+Board sheet: it fills only cells that were left blank, never the status column
+and never a formula. It writes ONCE, at the end, and says nothing to the
+assembler either way - a board that could not be written is something for LMSA
+to report, not an error to hand somebody at a bench. The tracker's own database
+holds the exact authoritative timing; the spreadsheet is a projection of it.
+
+**Deliberately not in V1:** live Job Board writing (the write contract is proven
+against a test workbook only), multi-assembler / join-another-job working, a
+manager's view of open and completed jobs in Slack, an assembler's own job
+history in Slack, a visibly ticking timer, and new multi-part modelling.
+
 ## Original baseline
 
 The original tracker is `main` at commit `0b736c0`.
@@ -132,7 +169,7 @@ commits, and never impersonate the original author.
 # Post-baseline feature history
 
 For each feature, record: the feature name, the date, what changed from an assembler's
-point of view, whether it was agreed with Luis beforehand, anything it needs on
+point of view, whether it departs from the original design, anything it needs on
 the LMSA side, and the commit or commits it arrived in.
 
 ## Delivery identity on Bolt's worker threads (2026-08-26)
@@ -147,7 +184,7 @@ never engaged. The fix hands Bolt an executor (`database.listener_executor()`)
 that picks the note up on the receiving thread and carries it onto the worker
 thread for exactly the length of the handler.
 
-Not agreed with Luis beforehand because it changes no tracker behaviour; it
+**No departure from the original design** - it changes no tracker behaviour; it
 makes an LMSA-side guarantee real. LMSA side: none beyond re-vendoring —
 the receiving column (`job_events.idempotency_key`) already existed.
 
@@ -177,7 +214,7 @@ The first agreed post-baseline feature. What changed for an assembler:
 - The completed-job summary and the Excel export show the jig values for both
   phases.
 
-Agreed with Luis beforehand: yes - jig size in millimetres for Field and
+**Confirmed in the creator review.** jig size in millimetres for Field and
 Border, editable in later phases, changes audited, was confirmed in the
 creator review. Tom's workshop detail refined the shape afterwards: one phase
 can use several jigs, and the value cannot be numeric-only.
@@ -226,7 +263,7 @@ The record of what happened is kept either way: choosing no border and taking
 it back are both written to the job's history, with who and when. Taking it
 back does not erase the original choice.
 
-Agreed with Luis beforehand: yes - "some jobs genuinely have no Border, add an
+**Confirmed in the creator review.** "some jobs genuinely have no Border, add an
 explicit No Border path, do not generalise it into skipping any phase" was
 confirmed in the creator review. It is Border-only for exactly that reason.
 Tom settled the two questions the review left open: where the assembler is asked,
@@ -276,7 +313,7 @@ correction is still refused while the packing timer is actually running
 (stop it first, the message says so), and once packing has been completed the
 button is gone and the refusal explains why.
 
-Agreed with Luis beforehand: yes - "packing is manually started and may
+**Confirmed in the creator review.** "packing is manually started and may
 interrupt sheeting" and "nothing ever auto-starts a timer" are both from the
 creator review, and this is built to exactly those words. The one automatic
 thing is conservative: switching to packing closes the timer the assembler is
@@ -337,8 +374,7 @@ same weight. Finishing a lane is one press that names the lane and asks first;
 once a lane is finished the same place says what is owed next ("Enter border
 details"). Refusals say what the job is doing and what to press instead.
 
-Agreed with Luis beforehand: no. This is workshop-originated, from watching
-the tracker in real use — the jig question came too early, "Start" was on a
+**A deliberate departure from the original design.** In use, the jig question came too early, "Start" was on a
 job already begun, and the cards read as a data dump. It changes no rule from
 the creator review: nothing auto-starts a timer except the handover the assembler
 themselves submits, one person still times one thing at a time, and packing
@@ -379,8 +415,8 @@ card went stale in another window; the setup card never mentioned that pausing
 finishes nothing, on the one card where a forgotten timer costs an evening. Each
 now says what is actually true of the job in front of the assembler.
 
-Agreed with Luis beforehand: no. This is workshop-originated, from reading the
-real surface rather than the transitions. It changes no rule from the creator
+**A deliberate departure from the original design**, from reading the real
+surface rather than the transitions. It changes no rule from the creator
 review — the same phases, the same one-timer-per-person, the same manual packing.
 
 LMSA side: nothing. These are Slack-facing corrections. A test now walks every
@@ -415,14 +451,106 @@ blocked until they also rewrite a date they never touched.
 Historical `N/A` rows are left alone. They read as "Not set" wherever a person
 sees them, and nothing was rewritten.
 
-Agreed with Luis beforehand: no. His form had the checkbox and stored `N/A`; this
-is a later business rule from Tom, who owns the workshop process. It is recorded
-here as a deliberate change to his design, not as a correction of a defect.
+**A deliberate departure from the original design.** His form had the checkbox
+and stored `N/A`; this is a later business rule from Tom, who owns the workshop
+process - a change to the design, not a correction of a defect.
 
 LMSA side: none. `due_date_not_applicable` stays in the schema as history and is
 still read faithfully; the adapter stores whatever it is handed, and the
 validation lives on the form, which is what keeps backfills and the word-for-word
 parity check honest.
+
+## One route through a job, and one form to start it (2026-09-14)
+
+The biggest change to what an assembler sees since the card was rebuilt, and it
+goes the other way from that rebuild. **It reverses a decision we made on
+purpose, so the reasoning is set out here rather than left to be discovered in
+the code.**
+
+**What we decided before, and why.** A job is not a wizard. An assembler
+preparing one part's field may need another part's border first, may come back,
+may pack in between, and none of that finishes what they moved away from. So
+the card offered every item of work the job contained, side by side, with
+nothing coloured in, and the press WAS the choice. That was right about the
+workshop and it is still right about a job drawn as several parts.
+
+**Why it changed.** Offering every valid destination shows an
+assembler the state machine rather than the job. On a job with three parts the
+card carried a dozen presses, most of them saying the same two words, and the
+question it answered best — "where could I go?" — is not the question someone
+at a bench is asking. The one they are asking is "what do I do now?", and the
+card made them work it out from a list.
+
+**What changes.** A job now runs one route, and the card shows the step in hand
+and the one press that moves it on:
+
+    Initial setup -> Field setup -> Field sheeting
+                  -> Border setup -> Border sheeting
+                  -> Packing -> Finish the job
+
+A lane the diagram does not have drops out of the route entirely, so a
+field-only job never sees a border and a border-only job never sees a field.
+Beside the forward press there is Pause, and only what genuinely belongs to the
+work in hand: Start cutting while sheeting, Set jig on a lane. A grey line under
+the buttons ticks off the steps already behind, because with no list of
+destinations there was otherwise nothing on the card saying how far along the
+job was.
+
+**What does not change, and this is the point.** Nothing underneath. The same
+segment ledger, the same setup measured apart from the sheeting, the same
+cutting contained inside the sheeting and never added on top of it, the same
+pause, the same audit, the same one timer per person across all their jobs, the
+same refusal when a stale card is pressed while another job is running. The
+engine stays exactly as flexible as it was; only what the card puts in front of
+the assembler is narrower.
+
+**And the old card is still here, unchanged.** `render_card` sends a job drawn
+as more than one part to `job_card` exactly as it was — a multi-part job has
+work the route cannot express, and the card that can show it is the one it
+keeps. The test is the job's own shape, so nothing had to be recorded anywhere
+and no existing job was migrated. Proven by comparing the old renderer's output
+before and after, block for block, across ten multi-part states.
+
+**The intake form is one screen.** Customer, invoice or pro forma, due date, and
+whether the job has a field, a border or both — a radio, because exactly one of
+those three is true and tick boxes let an assembler submit a job with neither.
+It no longer asks for a **job description**: what the job is is the diagram, and
+the box was being filled in with the customer's name again. It no longer asks
+**how many parts**, which was a question about how the tracker files the work
+rather than about the work. A job made here has one part, the assembler never
+sees it, and lane work is filed against it the way it always was.
+
+Moving to another stage of the same job — the "Switch work" idea — is not on
+this card. The logic that works it out is untouched and still in the file; it
+will come back later as ONE secondary press, rather than as a permanent grid.
+Moving to a different customer's job is unchanged and always was: pause this
+one, start or resume that one.
+
+**And Resume still means the ledger, not the route.** The route says what a job
+does in the ordinary case; it does not say what this assembler was doing when
+they stopped, and only one of those is a fact. Written the other way round
+first, the card put "Last on packing — 3s recorded" over a button offering to
+resume the field sheeting: the card contradicting its own history, and a press
+taking somebody somewhere they had not been. Whatever the ledger holds is what
+Resume offers, whether or not the route would have gone there next. The route
+answers only where the ledger has nothing to say — work nobody has started —
+and then the press reads "Start", because that is what it does. Found by the
+real-boundary proofs, which reach a job that has been packed mid-field; the
+card proof walks the route in order, where the two answers always agree, and
+could not have caught it.
+
+**A deliberate departure from the original design**, from using the rebuilt
+card. It changes no rule from the creator review — nothing auto-starts a
+timer except the handover the assembler submits, one person still times one
+thing at a time, and packing still only moves the job on when the assembler says
+so.
+
+LMSA side: `tracker.jobs.task_description` becomes nullable, so a job created
+without a description is recorded as having none rather than being given an
+invented one. Every description already stored is kept exactly as it is, the
+column stays, and no row is rewritten. The edit form keeps the box, optional, so
+a description a job already carries can still be read and corrected. Arrived in
+the single feature commit on `feature/linear-tracker-flow`.
 
 ## Known defect, deliberately not fixed: the export confirmation never fires
 
